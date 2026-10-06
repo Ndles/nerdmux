@@ -302,7 +302,7 @@ pub fn run(socket: &Path, request: Request) -> anyhow::Result<i32> {
     };
     let may_start = matches!(&request, Request::New { .. } | Request::Attach { create: true, .. });
     if attaches && std::env::var_os("NERDMUX").is_some_and(|v| !v.is_empty()) {
-        bail!("already inside nerdmux; use the switcher (Alt+s) to change session, or unset $NERDMUX to nest anyway");
+        bail!("already inside nerdmux; use the session manager (Alt+Space s) to change session, or unset $NERDMUX to nest anyway");
     }
     let mut attempt = 0;
     loop {
