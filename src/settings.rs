@@ -575,12 +575,12 @@ pub fn parse_input(set: &Setting, text: &str) -> Result<Item, String> {
         }
         Kind::Color => {
             let v = match text.parse::<i64>() {
-                Ok(n) => toml::Value::Integer(n),
-                Err(_) => toml::Value::String(text.into()),
+                Ok(n) => config::ThemeValue::Int(n),
+                Err(_) => config::ThemeValue::Text(text.into()),
             };
             config::parse_color(&v).ok_or_else(|| format!("{text:?} is not a color; try #rrggbb"))?;
             Ok(match v {
-                toml::Value::Integer(n) => toml_edit::value(n),
+                config::ThemeValue::Int(n) => toml_edit::value(n),
                 _ => toml_edit::value(text),
             })
         }

@@ -168,8 +168,21 @@ struct Raw {
     dim_inactive: Option<bool>,
     set_title: Option<bool>,
     extended_keys: Option<bool>,
-    theme: BTreeMap<String, toml::Value>,
+    theme: BTreeMap<String, ThemeValue>,
     keys: RawKeys,
+}
+
+/// An entry of `[theme]`: a color (`"#rrggbb"`, a name or a palette index),
+/// a switch, or the list of 16 palette colors.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(untagged)]
+pub enum ThemeValue {
+    Bool(bool),
+    Int(i64),
+    Text(String),
+    List(Vec<ThemeValue>),
+    /// Anything else (a float, a table): reported as a bad color.
+    Other(serde::de::IgnoredAny),
 }
 
 #[derive(Deserialize, Default)]
@@ -190,10 +203,10 @@ pub fn config_path() -> PathBuf {
     base.join("nerdmux").join("config.toml")
 }
 
-pub fn parse_color(v: &toml::Value) -> Option<Color> {
+pub fn parse_color(v: &ThemeValue) -> Option<Color> {
     match v {
-        toml::Value::Integer(n) if (0..=255).contains(n) => Some(Color::Indexed(*n as u8)),
-        toml::Value::String(s) => {
+        ThemeValue::Int(n) if (0..=255).contains(n) => Some(Color::Indexed(*n as u8)),
+        ThemeValue::Text(s) => {
             let s = s.trim();
             if let Some(hex) = s.strip_prefix('#') {
                 if hex.len() == 6 && hex.is_ascii() {
@@ -238,7 +251,7 @@ impl Config {
 
     pub fn from_toml(text: &str) -> Config {
         let mut c = Config::default();
-        let raw: Raw = match toml::from_str(text) {
+        let raw: Raw = match toml_edit::de::from_str(text) {
             Ok(r) => r,
             Err(e) => {
                 let first = e.message().lines().next().unwrap_or("syntax error").to_string();
@@ -298,11 +311,11 @@ impl Config {
         for (name, value) in &raw.theme {
             let t = &mut c.theme;
             match (name.as_str(), value) {
-                ("own_palette", toml::Value::Boolean(b)) => {
+                ("own_palette", ThemeValue::Bool(b)) => {
                     t.own_palette = *b;
                     continue;
                 }
-                ("palette", toml::Value::Array(items)) => {
+                ("palette", ThemeValue::List(items)) => {
                     let colors: Vec<Color> = items.iter().filter_map(parse_color).collect();
                     match <[Color; 16]>::try_from(colors) {
                         Ok(p) => t.palette = p,
