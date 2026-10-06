@@ -1,14 +1,21 @@
 # nerdmux
 
 A terminal multiplexer in one binary: sessions that survive closing the
-terminal, windows (tabs), split panes, all driven by key chords built from
-`Alt`, `Shift`, `Ctrl` and the arrow keys. No modes to learn and no letters
-standing in for directions.
+terminal, windows (tabs) and split panes. Arrow-key chords move you
+around; everything else is one leader key, `Alt+Space`, followed by a
+letter that names what it does. There are no modes to learn, and the
+shell keeps its own `Alt+letter` keys.
 
 It comes with its own look: a warm charcoal screen, amber as the main
-color, and muted, earthy tones for everything else.
+color, and muted, earthy tones for everything else. A settings panel
+changes any option on the spot and writes it to your config file, keeping
+your comments.
 
 Runs on Linux and macOS.
+
+> **Early days.** This is version 0.1.0. Expect rough edges, and changes
+> to keys and config between versions until 1.0. Bug reports are welcome; feature requests may take a
+> while or not fit the goal of a small, simple tool.
 
 ## Build
 
@@ -304,6 +311,31 @@ reported in the status bar and the affected settings keep their defaults.
   `$NERDMUX`; use the switcher to change session instead.
 - **Memory.** Each pane keeps its own scrollback; a pane with 10 000 full
   lines uses roughly 25 MB.
+
+## Why not tmux or Zellij?
+
+Both are mature and do more. nerdmux is for people who want something
+smaller with keys that are easy to learn:
+
+- **Keys.** tmux puts everything behind a prefix and single letters that
+  have to be memorized (`%`, `"`, `&`); Zellij uses modes and `Ctrl`
+  chords that often clash with programs in the pane. nerdmux uses arrows
+  for moving, a leader with first-letter keys for the rest, and leaves
+  `Ctrl+letter` and `Alt+letter` to your shell and editor.
+- **Setup.** It looks finished without configuration, and the settings
+  panel covers what people usually look up how to change.
+- **Size.** One small binary, no plugin system, no scripting language.
+
+What you give up:
+
+- **No plugins.** tmux has a large ecosystem (session restore, editor
+  integration such as vim-tmux-navigator, project layout tools); Zellij
+  has WebAssembly plugins and layout files. nerdmux has `nerdmux action`
+  for scripting and nothing more.
+- **Fewer features.** No session restore after a reboot, no floating
+  panes, no images in panes.
+- **Less proven.** tmux has had more than 15 years of use and is
+  installed on most servers; nerdmux is new.
 
 ## How it works
 
