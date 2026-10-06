@@ -688,7 +688,12 @@ fn command_palette_runs_actions() {
 fn pasted_text_reaches_the_shell() {
     let h = Harness::new();
     let mut c = h.attach(80, 24);
-    c.send(C2S::Paste("echo pasted-$((2+3))\n".into()));
+    // Shells with bracketed paste (bash 5.1 and later, zsh, fish) insert a
+    // pasted newline instead of running the line, as in any terminal; the
+    // command runs on Enter.
+    c.send(C2S::Paste("echo pasted-$((2+3))".into()));
+    c.wait_text("echo pasted-$((2+3))");
+    c.code(KeyCode::Enter);
     c.wait_text("pasted-5");
 }
 
