@@ -1,5 +1,7 @@
 # nerdmux
 
+![nerdmux: panes, windows, detach and reattach, sessions](docs/demo/nerdmux.gif)
+
 A terminal multiplexer in one binary: sessions that survive closing the
 terminal, windows (tabs) and split panes. Arrow-key chords move you
 around; everything else is one leader key, `Alt+Space`, followed by a
@@ -224,8 +226,8 @@ when the terminal offers it, so there you can bind such chords:
 
 None are bound by default, because window managers and terminal emulators
 keep most `Super` chords for themselves and what is left differs from desk
-to desk. This path was checked by feeding nerdmux the byte sequences those
-terminals send, not yet by sitting in front of one. Set
+to desk. `Super` and `Ctrl+Shift` chords have been checked in kitty and
+Ghostty; the other terminals only with the byte sequences they send. Set
 `extended_keys = false` to switch the request off.
 
 ### The leader on other terminals
