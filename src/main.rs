@@ -27,8 +27,9 @@ OPTIONS
   -h, --help                    this text
   -V, --version                 version
 
-Inside nerdmux, Alt+h lists every key and Alt+p opens the command palette.
-If your terminal does not pass Alt through, Ctrl+b then ? does the same.";
+Inside nerdmux, press the leader Alt+Space, then ? to list every key or p
+for the command palette. If your terminal does not pass Alt through, set
+another leader with `prefix` in the config.";
 
 fn fail(msg: &str) -> ! {
     eprintln!("nerdmux: {msg}\nTry `nerdmux --help`.");
