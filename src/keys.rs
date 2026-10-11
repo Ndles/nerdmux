@@ -76,6 +76,8 @@ pub enum Action {
     Switcher,
     /// List of sessions with keys to switch, create, rename and kill.
     Sessions,
+    /// Offer the sessions saved before a crash or reboot.
+    RestoreSessions,
     // Other
     CopyMode,
     CopyModePageUp,
@@ -129,6 +131,7 @@ impl Action {
             Action::Detach => "detach".into(),
             Action::Switcher => "switcher".into(),
             Action::Sessions => "sessions".into(),
+            Action::RestoreSessions => "restore-sessions".into(),
             Action::CopyMode => "copy-mode".into(),
             Action::CopyModePageUp => "copy-mode-page-up".into(),
             Action::Paste => "paste".into(),
@@ -195,6 +198,7 @@ impl Action {
             "detach" => Action::Detach,
             "switcher" | "choose-tree" | "find" => Action::Switcher,
             "sessions" | "session-manager" => Action::Sessions,
+            "restore-sessions" | "restore" => Action::RestoreSessions,
             "copy-mode" => Action::CopyMode,
             "copy-mode-page-up" => Action::CopyModePageUp,
             "paste" => Action::Paste,
@@ -247,6 +251,7 @@ impl Action {
             Action::Detach => "detach".into(),
             Action::Switcher => "find a session, window or pane".into(),
             Action::Sessions => "manage sessions".into(),
+            Action::RestoreSessions => "restore saved sessions".into(),
             Action::CopyMode => "copy / scroll mode".into(),
             Action::CopyModePageUp => "scroll back one page".into(),
             Action::Paste => "paste".into(),
@@ -297,7 +302,8 @@ impl Action {
             | Action::KillSession
             | Action::Detach
             | Action::Switcher
-            | Action::Sessions => "Sessions",
+            | Action::Sessions
+            | Action::RestoreSessions => "Sessions",
             Action::CopyMode | Action::CopyModePageUp | Action::Paste => "Copy & paste",
             _ => "General",
         }
@@ -362,6 +368,7 @@ impl Action {
             RenameSession,
             KillSession,
             Detach,
+            RestoreSessions,
             CopyMode,
             Paste,
             Help,

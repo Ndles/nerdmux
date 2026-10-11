@@ -18,6 +18,28 @@ pub enum Overlay {
     /// Arrows resize and move the focused pane until Enter.
     Arrange,
     Settings(crate::settings::Panel),
+    Restore(RestorePicker),
+}
+
+/// The sessions saved before a crash or reboot, to tick and bring back.
+#[derive(Clone, Debug)]
+pub struct RestorePicker {
+    /// When the snapshot was written, in seconds since the Unix epoch.
+    pub saved: u64,
+    pub items: Vec<RestoreItem>,
+    pub selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct RestoreItem {
+    /// Index of the session in the restorable snapshot.
+    pub index: usize,
+    pub name: String,
+    /// "2 windows, 3 panes"
+    pub summary: String,
+    /// Directory of its focused pane.
+    pub place: String,
+    pub checked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

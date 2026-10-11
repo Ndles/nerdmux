@@ -70,7 +70,32 @@ nerdmux attach -t work         # attach by name (a unique prefix is enough)
 nerdmux kill-session -t work
 nerdmux kill-server            # end everything
 nerdmux action split-right     # run any action from a script or a pane
+nerdmux restore                # bring back sessions saved before a crash
 ```
+
+### After a crash or reboot
+
+While it runs, nerdmux keeps a snapshot of its sessions in
+`~/.local/state/nerdmux/`, readable only by you: session and window names,
+the split layout, each pane's directory, the program running in it, and
+its last 1000 lines of text. Ending cleanly (`nerdmux kill-server`, or
+leaving the last shell) deletes the snapshot.
+
+If nerdmux did not end cleanly, because of a crash, a power loss or a
+reboot, the next `nerdmux` shows the saved sessions with a box to tick for
+each. Enter brings the ticked ones back; Esc starts fresh and keeps them
+for `nerdmux restore` (or `restore-sessions` in the command palette).
+
+Each pane comes back in its directory with its old text above a new shell.
+Programs that are safe to start again (editors, pagers, monitors such as
+nvim, less, htop, btop, lazygit) run again with their arguments. Anything
+else, a dev server, `ssh`, a build, is typed at the prompt for you to run
+with Enter. `restore_programs = ["k9s"]` in the config adds programs to the
+safe list; `restore = false` turns snapshots off and deletes them.
+
+The sessions' environment variables are not saved, since they may hold
+secrets: restored sessions get the environment of the terminal that
+restores them.
 
 ## Keys
 
@@ -330,12 +355,12 @@ smaller with keys that are easy to learn:
 
 What you give up:
 
-- **No plugins.** tmux has a large ecosystem (session restore, editor
-  integration such as vim-tmux-navigator, project layout tools); Zellij
+- **No plugins.** tmux has a large ecosystem (editor integration such as
+  vim-tmux-navigator, project layout tools); Zellij
   has WebAssembly plugins and layout files. nerdmux has `nerdmux action`
   for scripting and nothing more.
-- **Fewer features.** No session restore after a reboot, no floating
-  panes, no images in panes.
+- **Fewer features.** No floating panes, no images in panes, no layout
+  files.
 - **Less proven.** tmux has had more than 15 years of use and is
   installed on most servers; nerdmux is new.
 
@@ -355,9 +380,14 @@ server.
 
 ## Not there yet
 
-Sessions do not survive a reboot. No image protocols, hyperlinks or
-ligature-aware rendering; underline styles are drawn as a plain underline.
-The macOS-specific code compiles but has not been run on a Mac.
+Images in panes (kitty graphics, sixel) are not shown. Restoring programs
+after a crash needs Linux; on macOS panes come back with their directory
+and text only. The macOS-specific code compiles but has not been run on a Mac.
+
+Curly, dotted and colored underlines and clickable links (OSC 8) pass
+through to terminals known to show them: kitty, Ghostty, WezTerm, foot,
+Alacritty, VTE-based ones such as GNOME Terminal, and VS Code. Elsewhere
+underlines are plain and links are plain text.
 
 ## Development
 

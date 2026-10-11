@@ -8,7 +8,7 @@
 
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
 pub const SHIFT: u8 = 1;
@@ -135,6 +135,9 @@ pub enum Request {
         pane: Option<u32>,
         action: String,
     },
+    /// Attach (starting a session if there is none) and offer the saved
+    /// sessions back.
+    Restore,
 }
 
 #[derive(Debug, Clone)]
@@ -463,6 +466,7 @@ impl Wire for Request {
                 pane.put(out);
                 action.put(out);
             }
+            Request::Restore => out.push(6),
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -473,6 +477,7 @@ impl Wire for Request {
             3 => Request::KillSession { target: Wire::get(input)? },
             4 => Request::KillServer,
             5 => Request::Action { target: Wire::get(input)?, pane: Wire::get(input)?, action: Wire::get(input)? },
+            6 => Request::Restore,
             _ => return Err(bad("unknown request")),
         })
     }
@@ -582,6 +587,7 @@ mod tests {
             Request::KillSession { target: "x".into() },
             Request::KillServer,
             Request::Action { target: Some("w".into()), pane: Some(7), action: "split-right".into() },
+            Request::Restore,
         ] {
             let msg = C2S::Hello { version: 1, cols: 1, rows: 1, cwd: String::new(), env: Vec::new(), request };
             assert_eq!(format!("{:?}", round_trip(msg.clone())), format!("{msg:?}"));

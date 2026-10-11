@@ -16,6 +16,44 @@ pub fn cwd(pid: i32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
+/// The arguments `pid` was started with, program first.
+#[cfg(target_os = "linux")]
+pub fn cmdline(pid: i32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let args: Vec<String> =
+        raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (!args.is_empty()).then_some(args)
+}
+
+/// How many processes of process group `pgid` the process `parent`
+/// started itself. More than one is a pipeline (`make | less`); helpers a
+/// program starts, such as an editor's language servers, do not count.
+#[cfg(target_os = "linux")]
+pub fn group_children(pgid: i32, parent: i32) -> usize {
+    let Ok(dir) = std::fs::read_dir("/proc") else { return 0 };
+    dir.filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())))
+        .filter_map(|e| std::fs::read_to_string(e.path().join("stat")).ok())
+        .filter(|stat| {
+            // `pid (comm) state ppid pgrp ...`; comm may contain anything.
+            let after = stat.rfind(')').map_or("", |i| &stat[i + 1..]);
+            let mut fields = after.split_whitespace().skip(1).map(|f| f.parse::<i32>().ok());
+            let (ppid, pgrp) = (fields.next().flatten(), fields.next().flatten());
+            ppid == Some(parent) && pgrp == Some(pgid)
+        })
+        .count()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn cmdline(_pid: i32) -> Option<Vec<String>> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn group_children(_pgid: i32, _parent: i32) -> usize {
+    0
+}
+
 #[cfg(target_os = "macos")]
 pub fn name(pid: i32) -> Option<String> {
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];

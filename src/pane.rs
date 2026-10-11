@@ -6,6 +6,7 @@ use crate::layout::PaneId;
 use crate::procinfo;
 use crate::proto::{Key, Mouse};
 use crate::server::Event;
+use crate::status;
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction as GridDir, Line, Point, Side};
@@ -99,6 +100,8 @@ pub struct SpawnOpts<'a> {
 pub struct Pane {
     pub term: Term<Listener>,
     parser: Processor,
+    /// Spots the status requests the emulator leaves unanswered.
+    status: status::Scanner,
     events: Arc<Mutex<Vec<TermEvent>>>,
     master: Box<dyn MasterPty + Send>,
     writer: mpsc::Sender<Vec<u8>>,
@@ -117,6 +120,10 @@ pub struct Pane {
     pub copy: Option<CopyMode>,
     pub last_focus: u64,
     spawned: Instant,
+    /// The program printed something since the snapshot last took its text.
+    pub printed: bool,
+    /// Someone typed or pasted into the pane.
+    pub touched: bool,
 }
 
 /// Marker for "the program never chose a cursor shape": DECSCUSR cannot
@@ -204,6 +211,7 @@ impl Pane {
         Ok(Pane {
             term,
             parser: Processor::new(),
+            status: status::Scanner::default(),
             events,
             master: pair.master,
             writer,
@@ -217,13 +225,30 @@ impl Pane {
             copy: None,
             last_focus: 0,
             spawned: Instant::now(),
+            printed: false,
+            touched: false,
         })
     }
 
     /// Feed program output into the emulator.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<Notice> {
-        self.parser.advance(&mut self.term, bytes);
-        self.drain_events()
+        self.printed = true;
+        let mut notices = Vec::new();
+        let mut start = 0;
+        for (i, b) in bytes.iter().enumerate() {
+            if let Some(request) = self.status.push(*b) {
+                // Answer with the state right after the request, and after
+                // whatever the emulator owes for the output before it, so
+                // replies keep their order.
+                self.parser.advance(&mut self.term, &bytes[start..=i]);
+                start = i + 1;
+                notices.extend(self.drain_events());
+                self.write(status::reply(&request, &self.term.grid().cursor.template));
+            }
+        }
+        self.parser.advance(&mut self.term, &bytes[start..]);
+        notices.extend(self.drain_events());
+        notices
     }
 
     /// A program may start a synchronized update and never finish it; the
@@ -302,12 +327,14 @@ impl Pane {
     }
 
     pub fn send_key(&mut self, key: Key) {
+        self.touched = true;
         self.snap_to_bottom();
         let bytes = input::encode_key(key, self.mode());
         self.write(bytes);
     }
 
     pub fn send_paste(&mut self, text: &str) {
+        self.touched = true;
         self.snap_to_bottom();
         let bytes = input::encode_paste(text, self.mode());
         self.write(bytes);

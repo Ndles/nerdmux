@@ -14,9 +14,11 @@ use crate::proto::{
     read_msg, write_msg, Key, KeyCode, Mouse, MouseButton, MouseKind, Request, ALT, C2S, CTRL, PROTOCOL_VERSION, S2C,
     SHIFT, SUPER,
 };
+use crate::render::Caps;
 use crate::settings;
 use alacritty_terminal::index::Point;
 use alacritty_terminal::selection::SelectionType;
+use alacritty_terminal::term::cell::Hyperlink;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vi_mode::ViMotion;
 use base64::Engine;
@@ -27,11 +29,13 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+mod restore;
 
 pub type ClientId = u32;
 
@@ -52,6 +56,7 @@ pub enum Event {
     ClientGone(ClientId),
 }
 
+#[derive(Clone)]
 pub struct Window {
     pub id: WindowId,
     /// Name given by the user; otherwise the foreground program's name is shown.
@@ -181,6 +186,8 @@ pub struct Client {
     pub last_session: Option<SessionId>,
     /// What this client's terminal currently shows.
     pub prev: Buffer,
+    /// The link of each cell of `prev`.
+    pub prev_links: Vec<Option<Hyperlink>>,
     pub full_redraw: bool,
     pub prefix: Option<Prefix>,
     pub overlay: Option<Overlay>,
@@ -200,9 +207,8 @@ pub struct Client {
     pub pending: Vec<u8>,
     /// Title last sent to the client's terminal.
     pub title: String,
-    /// Whether the client's terminal takes 24-bit colors; otherwise they
-    /// are mapped to the nearest of the 256 standard ones.
-    pub truecolor: bool,
+    /// What the client's terminal can show.
+    pub caps: Caps,
 }
 
 pub struct Server {
@@ -225,6 +231,8 @@ pub struct Server {
     started: Instant,
     had_session: bool,
     last_poll: Instant,
+    /// The snapshot of the sessions kept on disk, and restoring from it.
+    snap: restore::SnapState,
 }
 
 /// Where windows are drawn inside a `cols` x `rows` terminal.
@@ -303,9 +311,10 @@ fn valid_name(name: &str) -> bool {
 }
 
 impl Server {
-    pub fn new(socket: String, tx: SyncSender<Event>) -> Server {
+    /// `terminating` is set when the server is told to stop (SIGTERM).
+    pub fn new(socket: String, tx: SyncSender<Event>, terminating: Arc<AtomicBool>) -> Server {
         let now = Instant::now();
-        Server {
+        let mut server = Server {
             config: Config::load(),
             sessions: Vec::new(),
             panes: HashMap::new(),
@@ -323,7 +332,10 @@ impl Server {
             started: now,
             had_session: false,
             last_poll: now,
-        }
+            snap: restore::SnapState::new(terminating),
+        };
+        server.snapshot_start();
+        server
     }
 
     fn id(&mut self) -> u32 {
@@ -343,6 +355,11 @@ impl Server {
         let mut last_render = Instant::now() - Duration::from_secs(1);
         let mut panics = 0u32;
         loop {
+            // Told to stop: leave at once, before handling the panes that
+            // end along with us, so the snapshot keeps them.
+            if self.snap.terminating() {
+                break;
+            }
             let now = Instant::now();
             let mut deadline = now + Duration::from_millis(500);
             if self.dirty {
@@ -362,7 +379,7 @@ impl Server {
                 if let Some(ev) = first {
                     self.handle(ev);
                     let batch = Instant::now();
-                    while batch.elapsed() < Duration::from_millis(4) {
+                    while batch.elapsed() < Duration::from_millis(4) && !self.snap.terminating() {
                         match rx.try_recv() {
                             Ok(ev) => self.handle(ev),
                             Err(_) => break,
@@ -387,6 +404,7 @@ impl Server {
                     }
                     self.dirty = true;
                     if panics > 20 {
+                        self.snap.failed = true;
                         self.shutdown = Some("[nerdmux server failed]".into());
                     }
                 }
@@ -405,6 +423,7 @@ impl Server {
         self.panes.clear();
         // Give writer threads a moment to deliver the goodbye.
         thread::sleep(Duration::from_millis(80));
+        self.snapshot_end();
     }
 
     fn next_timer(&self) -> Option<Instant> {
@@ -429,6 +448,9 @@ impl Server {
             if let Some(t) = p.sync_deadline() {
                 consider(t);
             }
+        }
+        if let Some(t) = self.snap.next_timer() {
+            consider(t);
         }
         next
     }
@@ -474,6 +496,7 @@ impl Server {
                 }
             }
         }
+        self.snapshot_tick(now);
         if self.shutdown.is_none() && self.sessions.is_empty() {
             let idle = self.clients.is_empty() && self.conns.is_empty();
             if self.had_session || (idle && now.duration_since(self.started) > Duration::from_secs(5)) {
@@ -488,6 +511,7 @@ impl Server {
                 let Some(pane) = self.panes.get_mut(&id) else { return };
                 let notices = pane.feed(&bytes);
                 self.dirty = true;
+                self.snapshot_output(id);
                 for n in notices {
                     match n {
                         Notice::Bell => self.bell(id),
@@ -587,6 +611,7 @@ impl Server {
                     c.cols = cols.max(1);
                     c.rows = rows.max(1);
                     c.prev = Buffer::empty(Rect::new(0, 0, c.cols, c.rows));
+                    c.prev_links = vec![None; c.prev.content.len()];
                     c.full_redraw = true;
                     self.adopt_client_size(id);
                     self.dirty = true;
@@ -609,7 +634,7 @@ impl Server {
         let reply = |message: String, code: i32| {
             let _ = link.send(S2C::Exit { message, code });
         };
-        let truecolor = env.iter().any(|(k, v)| k == "COLORTERM" && matches!(v.as_str(), "truecolor" | "24bit"));
+        let caps = Caps::detect(&env);
         match request {
             Request::List => {
                 let mut out = String::new();
@@ -629,6 +654,7 @@ impl Server {
                 reply(out.trim_end().to_string(), 0);
             }
             Request::KillServer => {
+                self.snap.clean = true;
                 reply(String::new(), 0);
                 self.shutdown = Some("[server exited]".into());
             }
@@ -645,7 +671,7 @@ impl Server {
                         let name = self.session_name(sid);
                         reply(format!("created session {name}"), 0);
                     }
-                    Ok(sid) => self.attach(id, link.clone(), cols, rows, sid, truecolor),
+                    Ok(sid) => self.attach(id, link.clone(), cols, rows, sid, caps),
                     Err(e) => reply(format!("nerdmux: {e}"), 1),
                 }
             }
@@ -661,13 +687,34 @@ impl Server {
                     None => self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id),
                 };
                 match found {
-                    Some(sid) => self.attach(id, link.clone(), cols, rows, sid, truecolor),
+                    Some(sid) => self.attach(id, link.clone(), cols, rows, sid, caps),
                     None if create => match self.create_session(None, Vec::new(), cwd, env, cols, rows) {
-                        Ok(sid) => self.attach(id, link.clone(), cols, rows, sid, truecolor),
-                        Err(e) => reply(format!("nerdmux: {e}"), 1),
+                        Ok(sid) => {
+                            self.note_placeholder(sid);
+                            self.attach(id, link.clone(), cols, rows, sid, caps);
+                        }
+                        Err(e) => return reply(format!("nerdmux: {e}"), 1),
                     },
-                    None => reply("nerdmux: no sessions".into(), 1),
+                    None => return reply("nerdmux: no sessions".into(), 1),
                 }
+                // After a crash or reboot, the first client is offered the
+                // saved sessions.
+                self.offer_restore(id, false);
+            }
+            Request::Restore => {
+                let found = self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id);
+                let sid = match found {
+                    Some(sid) => sid,
+                    None => match self.create_session(None, Vec::new(), cwd, env, cols, rows) {
+                        Ok(sid) => {
+                            self.note_placeholder(sid);
+                            sid
+                        }
+                        Err(e) => return reply(format!("nerdmux: {e}"), 1),
+                    },
+                };
+                self.attach(id, link.clone(), cols, rows, sid, caps);
+                self.offer_restore(id, true);
             }
             Request::Action { target, pane, action } => {
                 let Some(action) = Action::parse(&action) else {
@@ -692,7 +739,7 @@ impl Server {
         }
     }
 
-    fn attach(&mut self, id: ClientId, link: Link, cols: u16, rows: u16, sid: SessionId, truecolor: bool) {
+    fn attach(&mut self, id: ClientId, link: Link, cols: u16, rows: u16, sid: SessionId, caps: Caps) {
         let (cols, rows) = (cols.max(1), rows.max(1));
         let mut client = Client {
             id,
@@ -703,6 +750,7 @@ impl Server {
             session: sid,
             last_session: None,
             prev: Buffer::empty(Rect::new(0, 0, cols, rows)),
+            prev_links: vec![None; cols as usize * rows as usize],
             full_redraw: true,
             prefix: None,
             overlay: None,
@@ -716,7 +764,7 @@ impl Server {
             any_motion: false,
             pending: Vec::new(),
             title: String::new(),
-            truecolor,
+            caps,
         };
         if self.config.mouse {
             client.pending.extend_from_slice(MOUSE_ON);
@@ -1426,6 +1474,9 @@ impl Server {
         let mut replay = false;
         // A session manager command: the key and the selected session.
         let mut manage: Option<(char, Option<SessionId>)> = None;
+        // Saved sessions to bring back, or the restore picker was dismissed.
+        let mut restore: Option<Vec<usize>> = None;
+        let mut restore_dismissed = false;
 
         match &mut overlay {
             Overlay::Help { scroll } => match key.code {
@@ -1495,6 +1546,24 @@ impl Server {
                 }
                 keep = false;
             }
+            Overlay::Restore(r) => match key.code {
+                _ if cancel => {
+                    keep = false;
+                    restore_dismissed = true;
+                }
+                Up => r.selected = r.selected.saturating_sub(1),
+                Down => r.selected = (r.selected + 1).min(r.items.len().saturating_sub(1)),
+                Char(' ') if plain => {
+                    if let Some(item) = r.items.get_mut(r.selected) {
+                        item.checked = !item.checked;
+                    }
+                }
+                Enter => {
+                    restore = Some(r.items.iter().filter(|i| i.checked).map(|i| i.index).collect());
+                    keep = false;
+                }
+                _ => {}
+            },
             Overlay::PaneNumbers => {
                 if let Char(d @ '0'..='9') = key.code {
                     pane_number = Some(d as usize - '0' as usize);
@@ -1576,6 +1645,12 @@ impl Server {
         }
         if let Some((command, target)) = manage {
             self.session_command(cid, sid, command, target);
+        }
+        match restore {
+            Some(picks) if !picks.is_empty() => self.restore_sessions(cid, picks),
+            Some(_) => self.restore_dismissed(),
+            None if restore_dismissed => self.restore_dismissed(),
+            None => {}
         }
         // A prompt or confirmation that came from the session manager has
         // closed: go back to the manager.
@@ -2160,6 +2235,11 @@ impl Server {
                 let picker = self.build_sessions(sid);
                 set_overlay(self, Overlay::Picker(picker));
             }
+            Action::RestoreSessions => {
+                if let Some(cid) = cid {
+                    self.offer_restore(cid, true);
+                }
+            }
 
             // ----- other -----
             Action::CopyMode | Action::CopyModePageUp => {
@@ -2619,7 +2699,13 @@ pub fn serve(socket: &Path) -> anyhow::Result<()> {
         }
     })?;
 
-    let server = Server::new(socket.to_string_lossy().into_owned(), tx);
+    // SIGTERM (a reboot, a logout) and SIGINT stop the server without
+    // touching the snapshot, so the sessions are offered back next time.
+    let terminating = Arc::new(AtomicBool::new(false));
+    for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+        let _ = signal_hook::flag::register(signal, terminating.clone());
+    }
+    let server = Server::new(socket.to_string_lossy().into_owned(), tx, terminating);
     server.run(rx);
     // The lock file stays: removing it could let two servers hold "the" lock.
     drop(lock);

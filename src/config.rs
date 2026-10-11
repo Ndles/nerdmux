@@ -120,6 +120,10 @@ pub struct Config {
     pub set_title: bool,
     /// Ask the terminal for the kitty keyboard protocol (Super, Ctrl+Shift chords).
     pub extended_keys: bool,
+    /// Keep a snapshot of the sessions and offer it back after a crash or reboot.
+    pub restore: bool,
+    /// Programs started again on restore, on top of the built-in safe ones.
+    pub restore_programs: Vec<String>,
     pub theme: Theme,
     /// Problems found while loading; shown to the user on attach.
     pub warnings: Vec<String>,
@@ -144,6 +148,8 @@ impl Default for Config {
             dim_inactive: false,
             set_title: true,
             extended_keys: true,
+            restore: true,
+            restore_programs: Vec::new(),
             theme: Theme::default(),
             warnings: Vec::new(),
         }
@@ -168,6 +174,8 @@ struct Raw {
     dim_inactive: Option<bool>,
     set_title: Option<bool>,
     extended_keys: Option<bool>,
+    restore: Option<bool>,
+    restore_programs: Option<Vec<String>>,
     theme: BTreeMap<String, ThemeValue>,
     keys: RawKeys,
 }
@@ -296,6 +304,12 @@ impl Config {
             c.repeat_time = Duration::from_millis(ms);
         }
         c.copy_command = raw.copy_command.filter(|s| !s.is_empty());
+        if let Some(b) = raw.restore {
+            c.restore = b;
+        }
+        if let Some(p) = raw.restore_programs {
+            c.restore_programs = p;
+        }
         if let Some(b) = raw.inherit_cwd {
             c.inherit_cwd = b;
         }
@@ -387,6 +401,8 @@ repeat_time_ms = 700         # window in which resize keys repeat without the pr
 inherit_cwd = true           # new panes start in the directory of the current pane
 dim_inactive = false         # fade the text of panes that do not have the focus
 set_title = true             # show "session › program" as the terminal's title
+restore = true               # after a crash or reboot, offer to bring the sessions back
+# restore_programs = ["k9s"] # started again on restore, besides nvim, less, htop, lazygit, ...
 # copy_command = "pbcopy"    # extra clipboard command; OSC 52 is always sent
 term = "xterm-256color"      # $TERM inside panes
 

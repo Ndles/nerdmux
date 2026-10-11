@@ -16,6 +16,8 @@ USAGE
   nerdmux ls                       list sessions
   nerdmux kill-session -t NAME     end a session and everything in it
   nerdmux kill-server              end every session
+  nerdmux restore                  bring back sessions saved before a crash
+                                or reboot
   nerdmux action [-t NAME] ACTION  run an action in a session, e.g.
                                 nerdmux action split-right
   nerdmux keys                     print the key bindings
@@ -171,6 +173,12 @@ fn main() {
             None => fail("kill-session needs a session name"),
         },
         "kill-server" => Request::KillServer,
+        // Inside nerdmux the current client shows the saved sessions.
+        "restore" if std::env::var_os("NERDMUX").is_some_and(|v| !v.is_empty()) => {
+            let pane = std::env::var("NERDMUX_PANE").ok().and_then(|p| p.parse().ok());
+            Request::Action { target: None, pane, action: "restore-sessions".into() }
+        }
+        "restore" => Request::Restore,
         "action" => {
             let mut target = None;
             let mut words = Vec::new();

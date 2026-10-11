@@ -16,3 +16,5 @@ pub mod proto;
 pub mod render;
 pub mod server;
 pub mod settings;
+pub mod snapshot;
+pub mod status;

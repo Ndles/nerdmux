@@ -4,10 +4,10 @@
 use crate::config::{Config, StatusPos, Theme};
 use crate::keys::{self, Hint};
 use crate::layout::{Geometry, PaneId};
-use crate::overlay::{Confirm, Overlay, Picker, Prompt};
+use crate::overlay::{Confirm, Overlay, Picker, Prompt, RestorePicker};
 use crate::pane::Pane;
 use crate::server::{window_area, window_title, Client, ClientId, Server, Session};
-use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::cell::{Flags, Hyperlink};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor};
 use ratatui::buffer::{Buffer, Cell};
@@ -16,6 +16,57 @@ use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
 use std::io::Write;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+// ===== what ratatui's cells cannot hold =====================================
+//
+// A ratatui cell knows one kind of underline and nothing of links. The spare
+// bits of its `Modifier` carry the underline style (the SGR 4:n subparameter,
+// 0 for a plain one) and whether the link kept beside the buffer applies.
+// `put` and `fill` clear the modifier, so anything drawn over a pane cell
+// drops both.
+
+const UNDERLINE_SHIFT: u16 = 9;
+const UNDERLINE_STYLE: u16 = 0b111 << UNDERLINE_SHIFT;
+const LINKED: u16 = 1 << 12;
+
+fn underline_style(m: Modifier) -> u16 {
+    (m.bits() & UNDERLINE_STYLE) >> UNDERLINE_SHIFT
+}
+
+fn with_underline_style(m: Modifier, style: u16) -> Modifier {
+    Modifier::from_bits_retain(m.bits() & !UNDERLINE_STYLE | (style << UNDERLINE_SHIFT) & UNDERLINE_STYLE)
+}
+
+/// One changed cell: position, contents and the link it belongs to.
+pub type Update<'a> = (u16, u16, &'a Cell, Option<&'a Hyperlink>);
+
+/// The cells of `next` that differ from `prev`, in screen order. Like
+/// ratatui's `Buffer::diff`, but a cell also counts as changed when its link
+/// does. Both link slices hold one entry per cell.
+pub fn diff<'a>(
+    prev: &Buffer,
+    prev_links: &[Option<Hyperlink>],
+    next: &'a Buffer,
+    next_links: &'a [Option<Hyperlink>],
+) -> Vec<Update<'a>> {
+    let mut updates = Vec::new();
+    // Cells invalidated by drawing or replacing a wide character before them.
+    let mut invalidated: usize = 0;
+    // Cells covered by a wide character drawn just before.
+    let mut to_skip: usize = 0;
+    for (i, (current, previous)) in next.content.iter().zip(prev.content.iter()).enumerate() {
+        let link = next_links.get(i).and_then(Option::as_ref);
+        let link_changed = link != prev_links.get(i).and_then(Option::as_ref);
+        if !current.skip && (current != previous || link_changed || invalidated > 0) && to_skip == 0 {
+            let (x, y) = next.pos_of(i);
+            updates.push((x, y, current, link));
+        }
+        to_skip = current.symbol().width().saturating_sub(1);
+        let affected = current.symbol().width().max(previous.symbol().width());
+        invalidated = affected.max(invalidated).saturating_sub(1);
+    }
+    updates
+}
 
 // ===== small drawing helpers ================================================
 
@@ -79,6 +130,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, limit: u16, style: Style) -
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_char(c);
             cell.modifier = Modifier::empty();
+            cell.underline_color = Color::Reset;
             cell.skip = false;
             cell.set_style(style);
         }
@@ -86,6 +138,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, limit: u16, style: Style) -
             if let Some(cell) = buf.cell_mut((x + extra, y)) {
                 cell.set_symbol(" ");
                 cell.modifier = Modifier::empty();
+                cell.underline_color = Color::Reset;
                 cell.skip = false;
                 cell.set_style(style);
             }
@@ -102,6 +155,7 @@ fn fill(buf: &mut Buffer, rect: Rect, style: Style) {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_symbol(" ");
                 cell.modifier = Modifier::empty();
+                cell.underline_color = Color::Reset;
                 cell.skip = false;
                 cell.set_style(style);
             }
@@ -191,7 +245,15 @@ fn map_color(c: TermColor, foreground: bool, theme: &Theme) -> (Color, bool) {
     }
 }
 
-fn draw_pane(buf: &mut Buffer, rect: Rect, pane: &mut Pane, theme: &Theme, focused: bool, faded: bool) {
+fn draw_pane(
+    buf: &mut Buffer,
+    links: &mut [Option<Hyperlink>],
+    rect: Rect,
+    pane: &mut Pane,
+    theme: &Theme,
+    focused: bool,
+    faded: bool,
+) {
     if rect.width == 0 || rect.height == 0 {
         return;
     }
@@ -235,7 +297,23 @@ fn draw_pane(buf: &mut Buffer, rect: Rect, pane: &mut Pane, theme: &Theme, focus
             modifier |= Modifier::ITALIC;
         }
         if flags.intersects(Flags::ALL_UNDERLINES) {
-            modifier |= Modifier::UNDERLINED;
+            let style = if flags.contains(Flags::UNDERCURL) {
+                3
+            } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+                4
+            } else if flags.contains(Flags::DASHED_UNDERLINE) {
+                5
+            } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+                2
+            } else {
+                0
+            };
+            modifier = with_underline_style(modifier | Modifier::UNDERLINED, style);
+        }
+        let underline_color = cell.underline_color().map_or(Color::Reset, |c| map_color(c, true, theme).0);
+        let link = cell.hyperlink();
+        if link.is_some() {
+            modifier |= Modifier::from_bits_retain(LINKED);
         }
         if flags.contains(Flags::INVERSE) {
             modifier |= Modifier::REVERSED;
@@ -288,7 +366,11 @@ fn draw_pane(buf: &mut Buffer, rect: Rect, pane: &mut Pane, theme: &Theme, focus
         }
         target.fg = fg;
         target.bg = bg;
+        target.underline_color = underline_color;
         target.modifier = modifier;
+        if let Some(slot) = links.get_mut(y as usize * bw as usize + x as usize) {
+            *slot = link;
+        }
     }
 }
 
@@ -1011,6 +1093,63 @@ fn draw_confirm(buf: &mut Buffer, cols: u16, rows: u16, confirm: &Confirm, theme
     put(buf, inner.x + 2, inner.y + 2, hint, limit, body.fg(theme.dim));
 }
 
+/// `secs` since the Unix epoch as local time: "Oct 11 14:02".
+fn local_time(secs: u64) -> String {
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let t = secs as libc::time_t;
+    // SAFETY: `tm` is plain data and localtime_r only writes into it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
+        return String::new();
+    }
+    let month = MONTHS.get(tm.tm_mon as usize).copied().unwrap_or("?");
+    format!("{month} {} {:02}:{:02}", tm.tm_mday, tm.tm_hour, tm.tm_min)
+}
+
+/// The sessions saved before a crash or reboot, with boxes to tick.
+fn draw_restore(buf: &mut Buffer, cols: u16, rows: u16, picker: &RestorePicker, theme: &Theme) {
+    let note = format!("nerdmux did not shut down cleanly · saved {}", local_time(picker.saved));
+    let name_w = picker.items.iter().map(|i| text_width(&i.name)).max().unwrap_or(0).min(24);
+    let summary_w = picker.items.iter().map(|i| text_width(&i.summary)).max().unwrap_or(0);
+    let row_w = 6 + name_w + 3 + summary_w + 3 + 24;
+    let footer = "Space toggle · Enter restore · Esc start fresh";
+    let width = (row_w.max(text_width(&note) + 4).max(text_width(footer) + 6) + 2).min(cols.saturating_sub(2));
+    let list_h = (picker.items.len() as u16).clamp(1, rows.saturating_sub(8).max(1));
+    let rect = centered(cols, rows, width, list_h + 4, true);
+    let inner = popup(buf, rect, "Restore sessions?", footer, theme.accent, theme);
+    if inner.height < 3 || inner.width < 10 {
+        return;
+    }
+    let body = Style::default().fg(theme.popup_fg).bg(theme.popup_bg);
+    let limit = inner.x + inner.width;
+    put(buf, inner.x + 1, inner.y, &truncate(&note, inner.width - 2), limit, body.fg(theme.dim));
+    let list_h = (inner.height - 2) as usize;
+    let scroll = picker.selected.saturating_sub(list_h.saturating_sub(1));
+    for (row, item) in picker.items.iter().enumerate().skip(scroll).take(list_h) {
+        let y = inner.y + 2 + (row - scroll) as u16;
+        let selected = row == picker.selected;
+        let style = if selected { Style::default().fg(theme.accent_fg).bg(theme.accent) } else { body };
+        if selected {
+            fill(buf, Rect::new(inner.x, y, inner.width, 1), style);
+        }
+        let mark = if item.checked { "[x]" } else { "[ ]" };
+        let mut x = put(buf, inner.x + 1, y, mark, limit, if selected { style } else { style.fg(theme.green) });
+        x = put(buf, x + 1, y, &truncate(&item.name, name_w), limit, style.add_modifier(Modifier::BOLD));
+        let x_summary = inner.x + 6 + name_w + 2;
+        x = put(buf, x.max(x_summary), y, &item.summary, limit, if selected { style } else { style.fg(theme.dim) });
+        let room = limit.saturating_sub(x + 3);
+        if room >= 4 && !item.place.is_empty() {
+            let place = if text_width(&item.place) > room {
+                format!("…{}", tail(&item.place, room - 1))
+            } else {
+                item.place.clone()
+            };
+            let px = limit - 1 - text_width(&place);
+            put(buf, px, y, &place, limit, if selected { style } else { style.fg(theme.cyan) });
+        }
+    }
+}
+
 /// One line above the status bar explaining arrange mode.
 fn draw_arrange_hint(buf: &mut Buffer, bounds: Rect, theme: &Theme) {
     if bounds.height == 0 {
@@ -1034,8 +1173,20 @@ fn draw_arrange_hint(buf: &mut Buffer, bounds: Rect, theme: &Theme) {
 
 // ===== frame assembly =======================================================
 
+/// Forget the links of cells that something else was drawn over since the
+/// pane put them there.
+fn drop_covered_links(buf: &Buffer, links: &mut [Option<Hyperlink>]) {
+    for (cell, link) in buf.content.iter().zip(links.iter_mut()) {
+        if cell.modifier.bits() & LINKED == 0 {
+            *link = None;
+        }
+    }
+}
+
 struct Frame {
     buf: Buffer,
+    /// The link of each cell of `buf`, if any.
+    links: Vec<Option<Hyperlink>>,
     cursor: Option<(u16, u16, u8)>,
     any_motion: bool,
 }
@@ -1044,6 +1195,7 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
     let theme = &config.theme;
     let (cols, rows) = (client.cols, client.rows);
     let mut buf = Buffer::empty(Rect::new(0, 0, cols, rows));
+    let mut links = vec![None; buf.content.len()];
     if theme.own_palette {
         // The whole screen takes the theme's background, whatever the
         // terminal underneath is set to.
@@ -1070,7 +1222,7 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
     for (pid, rect) in &geom.panes {
         let Some(pane) = panes.get_mut(pid) else { continue };
         let focused = *pid == window.active;
-        draw_pane(&mut buf, *rect, pane, theme, focused, config.dim_inactive && !focused);
+        draw_pane(&mut buf, &mut links, *rect, pane, theme, focused, config.dim_inactive && !focused);
         draw_pane_badge(&mut buf, *rect, pane, theme);
         if *pid == window.active {
             if let Some(c) = pane.cursor() {
@@ -1137,6 +1289,10 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
             draw_confirm(&mut buf, cols, rows, confirm, theme);
             cursor = None;
         }
+        Some(Overlay::Restore(picker)) => {
+            draw_restore(&mut buf, cols, rows, picker, theme);
+            cursor = None;
+        }
         Some(Overlay::PaneNumbers) => {
             let order = window.layout.panes();
             draw_pane_numbers(&mut buf, &geom, &order, window.active, theme);
@@ -1152,7 +1308,8 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
     let any_motion = config.mouse
         && client.overlay.is_none()
         && panes.get(&window.active).is_some_and(|p| p.wants_mouse() && p.mode().contains(TermMode::MOUSE_MOTION));
-    Frame { buf, cursor, any_motion }
+    drop_covered_links(&buf, &mut links);
+    Frame { buf, links, cursor, any_motion }
 }
 
 /// The closest of the 256 standard colors, for terminals without true color.
@@ -1236,8 +1393,89 @@ fn width_is_uncertain(symbol: &str) -> bool {
         )
 }
 
-/// Encode changed cells as cursor moves, SGR changes and text.
-pub fn emit_cells(out: &mut Vec<u8>, updates: &[(u16, u16, &Cell)], cols: u16, truecolor: bool) {
+/// The index of a color that has one, for colors the SGR 58 form takes.
+fn color_index(color: Color) -> Option<u8> {
+    Some(match color {
+        Color::Indexed(i) => i,
+        Color::Black => 0,
+        Color::Red => 1,
+        Color::Green => 2,
+        Color::Yellow => 3,
+        Color::Blue => 4,
+        Color::Magenta => 5,
+        Color::Cyan => 6,
+        Color::Gray => 7,
+        Color::DarkGray => 8,
+        Color::LightRed => 9,
+        Color::LightGreen => 10,
+        Color::LightYellow => 11,
+        Color::LightBlue => 12,
+        Color::LightMagenta => 13,
+        Color::LightCyan => 14,
+        Color::White => 15,
+        Color::Reset | Color::Rgb(..) => return None,
+    })
+}
+
+fn push_underline_color(out: &mut Vec<u8>, color: Color, truecolor: bool) {
+    let _ = match color {
+        Color::Reset => write!(out, ";59"),
+        Color::Rgb(r, g, b) if truecolor => write!(out, ";58:2::{r}:{g}:{b}"),
+        Color::Rgb(r, g, b) => write!(out, ";58:5:{}", nearest_256(r, g, b)),
+        other => write!(out, ";58:5:{}", color_index(other).unwrap_or(0)),
+    };
+}
+
+/// Open `link` for the text that follows, or close the open one.
+fn push_link(out: &mut Vec<u8>, link: Option<&Hyperlink>) {
+    match link {
+        Some(link) => {
+            // The id sits inside `key=value:...` parameters and the URI ends
+            // at the string terminator: keep both from breaking out.
+            let id: String =
+                link.id().chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
+            let uri: String = link.uri().chars().filter(|c| !c.is_control()).collect();
+            let _ = write!(out, "\x1b]8;id={id};{uri}\x1b\\");
+        }
+        None => out.extend_from_slice(b"\x1b]8;;\x1b\\"),
+    }
+}
+
+/// How the client's terminal is written to.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Caps {
+    /// 24-bit colors; otherwise the nearest of the 256 standard ones.
+    pub truecolor: bool,
+    /// Underline styles and colors (SGR 4:n, 58) and links (OSC 8);
+    /// otherwise every underline is a plain one and links are left out.
+    pub styled: bool,
+}
+
+impl Caps {
+    /// What the client's terminal can do, judged from its environment.
+    pub fn detect(env: &[(String, String)]) -> Caps {
+        let get = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        let truecolor = matches!(get("COLORTERM"), Some("truecolor" | "24bit"));
+        let term = get("TERM").unwrap_or("");
+        // Inside tmux or screen, the terminal outside is out of sight.
+        let nested =
+            get("TMUX").is_some() || get("STY").is_some() || term.starts_with("screen") || term.starts_with("tmux");
+        // TERM survives ssh; the other variables say which terminal it is
+        // when it claims to be a plain xterm, as Alacritty often does.
+        let by_term = ["xterm-kitty", "xterm-ghostty", "foot", "wezterm", "alacritty", "contour"]
+            .iter()
+            .any(|t| term.starts_with(t));
+        let by_program = matches!(get("TERM_PROGRAM"), Some("WezTerm" | "ghostty" | "vscode"));
+        let by_marker = ["KITTY_WINDOW_ID", "ALACRITTY_WINDOW_ID", "GHOSTTY_RESOURCES_DIR", "WEZTERM_EXECUTABLE"]
+            .iter()
+            .any(|k| get(k).is_some());
+        let vte = get("VTE_VERSION").and_then(|v| v.parse::<u32>().ok()).is_some_and(|v| v >= 5200);
+        Caps { truecolor, styled: !nested && (by_term || by_program || by_marker || vte) }
+    }
+}
+
+/// Encode changed cells as cursor moves, SGR changes, links and text.
+pub fn emit_cells(out: &mut Vec<u8>, updates: &[Update], cols: u16, caps: Caps) {
     const MODS: [(Modifier, u8); 8] = [
         (Modifier::BOLD, 1),
         (Modifier::DIM, 2),
@@ -1251,36 +1489,58 @@ pub fn emit_cells(out: &mut Vec<u8>, updates: &[(u16, u16, &Cell)], cols: u16, t
     if updates.is_empty() {
         return;
     }
-    let (mut fg, mut bg, mut mods) = (Color::Reset, Color::Reset, Modifier::empty());
+    // What the terminal shows of a cell's attributes: never the link
+    // marker, and the underline style only where the terminal has styles.
+    let shown_bits = if caps.styled { !LINKED } else { !(LINKED | UNDERLINE_STYLE) };
+    let (mut fg, mut bg, mut ul, mut mods) = (Color::Reset, Color::Reset, Color::Reset, Modifier::empty());
+    let mut open: Option<&Hyperlink> = None;
     let mut expected: Option<(u16, u16)> = None;
-    for &(x, y, cell) in updates {
+    for &(x, y, cell, link) in updates {
         if expected != Some((x, y)) {
             let _ = write!(out, "\x1b[{};{}H", y + 1, x + 1);
         }
-        if cell.modifier != mods || cell.fg != fg || cell.bg != bg {
+        let link = if caps.styled { link } else { None };
+        if link != open {
+            push_link(out, link);
+            open = link;
+        }
+        let cell_mods = Modifier::from_bits_retain(cell.modifier.bits() & shown_bits);
+        let cell_ul =
+            if caps.styled && cell_mods.contains(Modifier::UNDERLINED) { cell.underline_color } else { Color::Reset };
+        if cell_mods != mods || cell.fg != fg || cell.bg != bg || cell_ul != ul {
             out.extend_from_slice(b"\x1b[");
             let start = out.len();
-            if cell.modifier != mods {
+            if cell_mods != mods {
                 // Attributes cannot all be switched off one by one portably,
                 // so start over.
                 out.extend_from_slice(b";0");
                 for (m, code) in MODS {
-                    if cell.modifier.contains(m) {
-                        let _ = write!(out, ";{code}");
+                    if !cell_mods.contains(m) {
+                        continue;
                     }
+                    let _ = match underline_style(cell_mods) {
+                        style if m == Modifier::UNDERLINED && style != 0 => write!(out, ";4:{style}"),
+                        _ => write!(out, ";{code}"),
+                    };
                 }
                 if cell.fg != Color::Reset {
-                    push_color(out, cell.fg, true, truecolor);
+                    push_color(out, cell.fg, true, caps.truecolor);
                 }
                 if cell.bg != Color::Reset {
-                    push_color(out, cell.bg, false, truecolor);
+                    push_color(out, cell.bg, false, caps.truecolor);
+                }
+                if cell_ul != Color::Reset {
+                    push_underline_color(out, cell_ul, caps.truecolor);
                 }
             } else {
                 if cell.fg != fg {
-                    push_color(out, cell.fg, true, truecolor);
+                    push_color(out, cell.fg, true, caps.truecolor);
                 }
                 if cell.bg != bg {
-                    push_color(out, cell.bg, false, truecolor);
+                    push_color(out, cell.bg, false, caps.truecolor);
+                }
+                if cell_ul != ul {
+                    push_underline_color(out, cell_ul, caps.truecolor);
                 }
             }
             // Parameters were written with a leading ';' each; drop the first.
@@ -1288,7 +1548,8 @@ pub fn emit_cells(out: &mut Vec<u8>, updates: &[(u16, u16, &Cell)], cols: u16, t
             out.push(b'm');
             fg = cell.fg;
             bg = cell.bg;
-            mods = cell.modifier;
+            ul = cell_ul;
+            mods = cell_mods;
         }
         let symbol = cell.symbol();
         let width = UnicodeWidthStr::width(symbol) as u16;
@@ -1301,6 +1562,9 @@ pub fn emit_cells(out: &mut Vec<u8>, updates: &[(u16, u16, &Cell)], cols: u16, t
         // Terminals disagree about the width of emoji and symbols; after
         // one of those, say where the cursor is rather than assume.
         expected = if next < cols && !width_is_uncertain(symbol) { Some((next, y)) } else { None };
+    }
+    if open.is_some() {
+        push_link(out, None);
     }
     out.extend_from_slice(b"\x1b[0m");
 }
@@ -1315,14 +1579,15 @@ impl Server {
         let frame = compose(client, session, panes, config);
 
         let full = client.full_redraw || client.prev.area != frame.buf.area;
-        let blank;
-        let prev = if full {
+        let (blank, blank_links);
+        let (prev, prev_links) = if full {
             blank = Buffer::empty(frame.buf.area);
-            &blank
+            blank_links = vec![None; blank.content.len()];
+            (&blank, &blank_links)
         } else {
-            &client.prev
+            (&client.prev, &client.prev_links)
         };
-        let updates = prev.diff(&frame.buf);
+        let updates = diff(prev, prev_links, &frame.buf, &frame.links);
         let mut pending = std::mem::take(&mut client.pending);
         if config.set_title {
             let window = session.window();
@@ -1348,9 +1613,12 @@ impl Server {
         if full {
             out.extend_from_slice(b"\x1b[0m\x1b[2J");
         }
-        emit_cells(&mut out, &updates, frame.buf.area.width, client.truecolor);
+        emit_cells(&mut out, &updates, frame.buf.area.width, client.caps);
         if motion_changed {
-            out.extend_from_slice(if frame.any_motion { b"\x1b[?1003h" } else { b"\x1b[?1003l" });
+            // Terminals keep one mouse mode at a time: leaving all-motion
+            // reporting must ask for drag reporting again, or the mouse
+            // goes silent and the wheel turns into arrow keys.
+            out.extend_from_slice(if frame.any_motion { b"\x1b[?1003h" } else { b"\x1b[?1003l\x1b[?1002h" });
             client.any_motion = frame.any_motion;
         }
         if let Some((x, y, style)) = frame.cursor {
@@ -1364,6 +1632,7 @@ impl Server {
 
         client.cursor = frame.cursor;
         client.prev = frame.buf;
+        client.prev_links = frame.links;
         client.full_redraw = false;
         Some(out)
     }
@@ -1403,19 +1672,137 @@ mod tests {
         assert_eq!(tail("日本語", 4), "本語");
     }
 
+    const RICH: Caps = Caps { truecolor: true, styled: true };
+
+    /// A one-row buffer of "abcd" in which cell `i` has modifier `mods[i]`,
+    /// underline color `ul` and link `links[i]`.
+    fn styled_row(mods: [Modifier; 4], ul: Color, links: &[Option<Hyperlink>; 4]) -> (Buffer, Vec<Option<Hyperlink>>) {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        put(&mut buf, 0, 0, "abcd", 4, Style::default());
+        for (i, m) in mods.iter().enumerate() {
+            let cell = &mut buf.content[i];
+            cell.modifier = *m;
+            cell.underline_color = ul;
+            if links[i].is_some() {
+                cell.modifier |= Modifier::from_bits_retain(LINKED);
+            }
+        }
+        (buf, links.to_vec())
+    }
+
+    fn emitted(next: &(Buffer, Vec<Option<Hyperlink>>), caps: Caps) -> String {
+        let prev = Buffer::empty(next.0.area);
+        let mut out = Vec::new();
+        emit_cells(&mut out, &diff(&prev, &[], &next.0, &next.1), 4, caps);
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn underline_styles_and_colors() {
+        let u = Modifier::UNDERLINED;
+        let row = styled_row(
+            [with_underline_style(u, 3), with_underline_style(u, 4), u, Modifier::empty()],
+            Color::Rgb(208, 112, 94),
+            &[None, None, None, None],
+        );
+        // Curly and dotted keep their style; the color applies to underlined
+        // cells only, so the last cell switches everything off.
+        assert_eq!(
+            emitted(&row, RICH),
+            "\x1b[1;1H\x1b[0;4:3;58:2::208:112:94ma\x1b[0;4:4;58:2::208:112:94mb\x1b[0;4;58:2::208:112:94mc\x1b[0md\x1b[0m"
+        );
+        // A color change alone does not restart the attributes.
+        let mut row = styled_row([u, u, u, u], Color::Indexed(1), &[None, None, None, None]);
+        row.0.content[2].underline_color = Color::Reset;
+        row.0.content[3].underline_color = Color::Rgb(1, 2, 3);
+        assert_eq!(
+            emitted(&row, Caps { truecolor: false, styled: true }),
+            "\x1b[1;1H\x1b[0;4;58:5:1mab\x1b[59mc\x1b[58:5:16md\x1b[0m"
+        );
+        // Terminals without styles get a plain underline and no color.
+        let row = styled_row([with_underline_style(u, 3), u, u, u], Color::Indexed(1), &[None, None, None, None]);
+        assert_eq!(emitted(&row, Caps { truecolor: true, styled: false }), "\x1b[1;1H\x1b[0;4mabcd\x1b[0m");
+    }
+
+    #[test]
+    fn links_open_switch_and_close() {
+        let docs = Hyperlink::new(Some("d:1;x"), "https://example.com/docs".into());
+        let home = Hyperlink::new(Some("h"), "https://example.com/\x07home".into());
+        let none = Modifier::empty();
+        let row = styled_row([none; 4], Color::Reset, &[Some(docs.clone()), Some(docs), Some(home), None]);
+        // The id loses the characters that would end its parameter, the
+        // URI its control characters, and the last link is always closed.
+        assert_eq!(
+            emitted(&row, RICH),
+            "\x1b[1;1H\x1b]8;id=d1x;https://example.com/docs\x1b\\ab\x1b]8;id=h;https://example.com/home\x1b\\c\x1b]8;;\x1b\\d\x1b[0m"
+        );
+        assert_eq!(emitted(&row, Caps { truecolor: true, styled: false }), "\x1b[1;1Habcd\x1b[0m");
+        let tail =
+            styled_row([none; 4], Color::Reset, &[None, None, None, Some(Hyperlink::new(Some("t"), "x".into()))]);
+        assert!(emitted(&tail, RICH).ends_with("d\x1b]8;;\x1b\\\x1b[0m"));
+    }
+
+    #[test]
+    fn a_new_link_on_the_same_text_is_redrawn() {
+        let old = styled_row(
+            [Modifier::empty(); 4],
+            Color::Reset,
+            &[Some(Hyperlink::new(Some("a"), "x".into())), None, None, None],
+        );
+        let new = styled_row(
+            [Modifier::empty(); 4],
+            Color::Reset,
+            &[Some(Hyperlink::new(Some("b"), "y".into())), None, None, None],
+        );
+        let mut out = Vec::new();
+        emit_cells(&mut out, &diff(&old.0, &old.1, &new.0, &new.1), 4, RICH);
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[1;1H\x1b]8;id=b;y\x1b\\a\x1b]8;;\x1b\\\x1b[0m");
+    }
+
+    #[test]
+    fn popups_cover_underline_styles_and_links() {
+        let link = Some(Hyperlink::new(Some("a"), "x".into()));
+        let curly = with_underline_style(Modifier::UNDERLINED, 3);
+        let (mut buf, mut links) =
+            styled_row([curly; 4], Color::Indexed(1), &[link.clone(), link.clone(), link.clone(), link]);
+        fill(&mut buf, Rect::new(1, 0, 2, 1), Style::default());
+        drop_covered_links(&buf, &mut links);
+        assert!(links[0].is_some() && links[1].is_none() && links[2].is_none() && links[3].is_some());
+        assert_eq!(buf.content[1].modifier, Modifier::empty());
+        assert_eq!(buf.content[1].underline_color, Color::Reset);
+    }
+
+    #[test]
+    fn detects_terminals_with_styled_underlines() {
+        let caps = |vars: &[(&str, &str)]| {
+            Caps::detect(&vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>()).styled
+        };
+        assert!(caps(&[("TERM", "xterm-kitty")]));
+        assert!(caps(&[("TERM", "xterm-ghostty")]));
+        assert!(caps(&[("TERM", "foot-extra")]));
+        assert!(caps(&[("TERM", "xterm-256color"), ("ALACRITTY_WINDOW_ID", "1")]));
+        assert!(caps(&[("TERM", "xterm-256color"), ("VTE_VERSION", "7600")]));
+        assert!(!caps(&[("TERM", "xterm-256color")]));
+        assert!(!caps(&[("TERM", "xterm-256color"), ("VTE_VERSION", "4600")]));
+        assert!(!caps(&[("TERM", "linux")]));
+        // Behind tmux the terminal outside may not keep up.
+        assert!(!caps(&[("TERM", "tmux-256color"), ("KITTY_WINDOW_ID", "1")]));
+        assert!(!caps(&[("TERM", "xterm-kitty"), ("TMUX", "/tmp/tmux,1,0")]));
+    }
+
     #[test]
     fn emits_minimal_sequences() {
         let mut prev = Buffer::empty(Rect::new(0, 0, 10, 2));
         let mut next = prev.clone();
         let mut out = Vec::new();
-        emit_cells(&mut out, &prev.diff(&next), 10, true);
+        emit_cells(&mut out, &diff(&prev, &[], &next, &[]), 10, RICH);
         assert!(out.is_empty());
 
         let bold_red = Style::default().fg(Color::Indexed(1)).add_modifier(Modifier::BOLD);
         put(&mut next, 2, 1, "ab", 10, bold_red);
         put(&mut next, 4, 1, "c", 10, bold_red);
         put(&mut next, 5, 1, "d", 10, bold_red.fg(Color::Indexed(200)).bg(Color::Rgb(1, 2, 3)));
-        emit_cells(&mut out, &prev.diff(&next), 10, true);
+        emit_cells(&mut out, &diff(&prev, &[], &next, &[]), 10, RICH);
         assert_eq!(
             String::from_utf8(out.clone()).unwrap(),
             "\x1b[2;3H\x1b[0;1;31mabc\x1b[38;5;200;48;2;1;2;3md\x1b[0m"
@@ -1425,7 +1812,7 @@ mod tests {
         prev = next.clone();
         put(&mut next, 0, 0, "日x", 10, Style::default());
         out.clear();
-        emit_cells(&mut out, &prev.diff(&next), 10, true);
+        emit_cells(&mut out, &diff(&prev, &[], &next, &[]), 10, RICH);
         assert_eq!(String::from_utf8(out.clone()).unwrap(), "\x1b[1;1H日x\x1b[0m");
 
         // After an emoji the position is stated again, in case the
@@ -1433,7 +1820,7 @@ mod tests {
         prev = next.clone();
         put(&mut next, 0, 0, "😀ab", 10, Style::default());
         out.clear();
-        emit_cells(&mut out, &prev.diff(&next), 10, true);
+        emit_cells(&mut out, &diff(&prev, &[], &next, &[]), 10, RICH);
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b[1;1H😀\x1b[1;3Hab\x1b[0m");
     }
 
@@ -1451,7 +1838,7 @@ mod tests {
         let mut next = prev.clone();
         put(&mut next, 0, 0, "x", 4, Style::default().fg(Color::Rgb(0xFF, 0xB0, 0x00)).bg(Color::Rgb(10, 10, 18)));
         let mut out = Vec::new();
-        emit_cells(&mut out, &prev.diff(&next), 4, false);
+        emit_cells(&mut out, &diff(&prev, &[], &next, &[]), 4, Caps::default());
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b[1;1H\x1b[38;5;214;48;5;232mx\x1b[0m");
     }
 

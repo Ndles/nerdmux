@@ -296,11 +296,11 @@ fn interactive(mut stream: UnixStream, request: Request) -> anyhow::Result<i32> 
 
 pub fn run(socket: &Path, request: Request) -> anyhow::Result<i32> {
     let attaches = match &request {
-        Request::Attach { .. } => true,
+        Request::Attach { .. } | Request::Restore => true,
         Request::New { detached, .. } => !detached,
         _ => false,
     };
-    let may_start = matches!(&request, Request::New { .. } | Request::Attach { create: true, .. });
+    let may_start = matches!(&request, Request::New { .. } | Request::Attach { create: true, .. } | Request::Restore);
     if attaches && std::env::var_os("NERDMUX").is_some_and(|v| !v.is_empty()) {
         bail!("already inside nerdmux; use the session manager (Alt+Space s) to change session, or unset $NERDMUX to nest anyway");
     }

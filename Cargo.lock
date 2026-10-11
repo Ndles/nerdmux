@@ -562,6 +562,7 @@ dependencies = [
  "bitflags 2.13.2",
  "cassowary",
  "compact_str",
+ "crossterm",
  "indoc",
  "instability",
  "itertools",

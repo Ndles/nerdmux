@@ -5,8 +5,8 @@
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use nerdmux::proto::{
     read_msg, write_msg, Key, KeyCode, Mouse, MouseButton, MouseKind, Request, ALT, C2S, CTRL, PROTOCOL_VERSION, S2C,
@@ -86,6 +86,8 @@ impl Harness {
             ("LANG", "C.UTF-8"),
             ("NERDMUX_SOCKET", self.socket().to_str().unwrap()),
             ("NERDMUX_CONFIG", self.dir.join("config.toml").to_str().unwrap()),
+            // Snapshots are written a moment after changes; keep it short.
+            ("NERDMUX_SNAPSHOT_MS", "200"),
         ]
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -128,6 +130,91 @@ impl Harness {
         let mut c = self.connect(cols, rows, Request::Attach { target: Some("main".into()), create: false });
         c.wait_for("the shell prompt", |s| s.iter().any(|l| l.starts_with('$')));
         c
+    }
+}
+
+impl Harness {
+    /// The live snapshot file of this server, once written.
+    fn snapshot(&self) -> Option<PathBuf> {
+        let dir = self.dir.join(".local/state/nerdmux");
+        std::fs::read_dir(dir).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().into_owned();
+            name.ends_with(".toml") && !name.ends_with(".restorable.toml")
+        })
+    }
+
+    /// Wait until the live snapshot mentions everything in `needles`.
+    fn wait_snapshot(&self, needles: &[&str]) -> String {
+        let start = Instant::now();
+        loop {
+            let text = self.snapshot().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+            if needles.iter().all(|n| text.contains(n)) {
+                return text;
+            }
+            assert!(start.elapsed() < TIMEOUT, "snapshot never had {needles:?}:\n{text}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// The server's process id, found by its command line.
+    fn server_pid(&self) -> i32 {
+        let socket = self.socket().to_string_lossy().into_owned();
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+                let cmd = std::fs::read(e.path().join("cmdline")).ok()?;
+                let args: Vec<String> =
+                    cmd.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+                (args.iter().any(|a| a == "__server") && args.contains(&socket)).then_some(pid)
+            })
+            .next()
+            .expect("server process")
+    }
+
+    /// Processes the server started: the panes' shells.
+    fn shell_pids(&self, server: i32) -> Vec<i32> {
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+                let ppid: i32 = stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()?;
+                (ppid == server).then_some(pid)
+            })
+            .collect()
+    }
+
+    /// Wait for the server to be gone, socket and process.
+    fn wait_server_gone(&self, pid: i32) {
+        let start = Instant::now();
+        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+            assert!(start.elapsed() < TIMEOUT, "server did not exit");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Start a server with no sessions, as plain `nerdmux` does.
+    fn start_server(&self) {
+        let bin = std::env::var("NERDMUX_TEST_BIN").unwrap_or_else(|_| BIN.to_string());
+        let status = Command::new(bin)
+            .arg("__server")
+            .arg(self.socket())
+            .env_clear()
+            .envs(self.env())
+            .current_dir(&self.dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(self.dir.join("s2.log")).unwrap())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let start = Instant::now();
+        while UnixStream::connect(self.socket()).is_err() {
+            assert!(start.elapsed() < TIMEOUT, "server did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -176,6 +263,13 @@ impl Client {
                 Err(_) => break,
             }
         }
+    }
+
+    /// The cell where `needle` starts on screen.
+    fn cell_at(&self, needle: &str) -> &Cell {
+        let (y, line) = self.screen().into_iter().enumerate().find(|(_, l)| l.contains(needle)).expect(needle);
+        let x = line[..line.find(needle).unwrap()].chars().count();
+        &self.term.grid()[Line(y as i32)][Column(x)]
     }
 
     fn screen(&self) -> Vec<String> {
@@ -1185,6 +1279,204 @@ fn status_bar_shows_directory_branch_and_panes() {
         eprintln!("{}", c.dump());
     }
     std::fs::remove_dir_all(&repo).unwrap();
+}
+
+#[test]
+fn underline_styles_and_links_reach_terminals_that_show_them() {
+    let h = Harness::new();
+    let attach = Request::Attach { target: Some("main".into()), create: false };
+    // The words are split in the command so only the output contains them.
+    let print = "printf '\\033[4:3;58:2::208:112:94m%s%s\\033[0m \\033]8;;https://example.com/x\\033\\\\%s%s\\033]8;;\\033\\\\\\n' cur ly link ed";
+
+    let mut rich = h.connect_env(100, 24, attach.clone(), &[("TERM", "xterm-kitty"), ("COLORTERM", "truecolor")]);
+    rich.wait_for("the shell prompt", |s| s.iter().any(|l| l.starts_with('$')));
+    rich.run(print);
+    rich.wait_text("curly linked");
+    let curly = rich.cell_at("curly");
+    assert!(curly.flags.contains(Flags::UNDERCURL), "{:?}", curly.flags);
+    assert_eq!(format!("{:?}", curly.underline_color()), "Some(Spec(Rgb { r: 208, g: 112, b: 94 }))");
+    assert!(curly.hyperlink().is_none());
+    let linked = rich.cell_at("linked");
+    assert_eq!(linked.hyperlink().map(|l| l.uri().to_string()).as_deref(), Some("https://example.com/x"));
+    assert!(rich.cell_at("$").hyperlink().is_none(), "the link leaked past its text");
+
+    // An unknown terminal gets a plain underline and no link.
+    let mut plain = h.connect_env(100, 24, attach, &[("TERM", "xterm-256color")]);
+    plain.wait_text("curly linked");
+    let curly = plain.cell_at("curly");
+    assert!(curly.flags.contains(Flags::UNDERLINE) && !curly.flags.contains(Flags::UNDERCURL), "{:?}", curly.flags);
+    assert!(curly.underline_color().is_none());
+    assert!(plain.cell_at("linked").hyperlink().is_none());
+    assert!(!plain.raw_text().contains("\x1b]8;"), "a link was sent to a terminal that may not take it");
+}
+
+#[test]
+fn programs_can_ask_which_attributes_are_set() {
+    let h = Harness::new();
+    let mut c = h.attach(100, 24);
+    // Set bold and a curly underline, ask (DECRQSS), and print the reply
+    // the pane sends back as input.
+    c.run("stty -icanon -echo min 0 time 10; printf '\\033[1;4:3m\\033P$qm\\033\\\\\\033[0m'; dd bs=64 count=1 2>/dev/null | od -An -c; stty sane");
+    c.wait_text("4   :   3");
+    let screen = c.screen().join("\n");
+    assert!(screen.contains("033   P   1   $   r   0   ;   1   ;   4   :   3   m 033   \\"), "{screen}");
+}
+
+#[test]
+fn mouse_reporting_survives_programs_that_track_all_motion() {
+    let h = Harness::new();
+    let mut c = h.attach(80, 24);
+    assert!(c.term.mode().contains(TermMode::MOUSE_DRAG), "drag reporting is on from the start");
+    // A program asks for every movement and then stops. Terminals keep one
+    // mouse mode at a time, so the drag mode must be asked for again.
+    c.run("printf '\\033[?1003h'; sleep 0.3; printf '\\033[?1003l'; echo motion-''done");
+    c.wait_text("motion-done");
+    c.pump(Duration::from_millis(200));
+    let mode = *c.term.mode();
+    assert!(mode.intersects(TermMode::MOUSE_MODE), "the terminal no longer reports the mouse: {mode:?}");
+    assert!(!mode.contains(TermMode::MOUSE_MOTION), "{mode:?}");
+}
+
+/// Two windows: the first split, with output, a directory and a command
+/// that may not run again; the second running `less`, which may.
+fn build_sessions_to_lose(h: &Harness) -> Client {
+    let work = h.dir.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(h.dir.join("notes.txt"), "notes-content\n").unwrap();
+    let mut c = h.attach(100, 30);
+    c.run(&format!("cd {}", work.display()));
+    c.run("echo before-''crash");
+    c.wait_text("before-crash");
+    c.prefix('\\');
+    c.wait_for("a second pane", |s| s.last().unwrap().contains("2 panes"));
+    c.run("sleep 300");
+    c.prefix('t');
+    c.wait_for("a second window", |s| s.last().unwrap().contains("2 "));
+    c.run(&format!("less {}", h.dir.join("notes.txt").display()));
+    c.wait_text("notes-content");
+    h.wait_snapshot(&["before-crash", "\"sleep\"", "\"less\"", "/work"]);
+    c
+}
+
+/// Restore what `build_sessions_to_lose` made, through the picker that a
+/// new server offers, and check it came back.
+fn restore_and_check(h: &Harness) {
+    h.start_server();
+    let mut c = h.connect(100, 30, Request::Attach { target: None, create: true });
+    c.wait_text("Restore sessions?");
+    assert!(c.screen().join("\n").contains("2 windows, 3 panes"), "{}", c.dump());
+    c.code(KeyCode::Enter);
+    // The second window had the focus and runs `less` again.
+    c.wait_text("notes-content");
+    assert!(c.status().contains("main"), "{}", c.status());
+    c.prefix('1');
+    c.wait_text("before-crash");
+    assert!(c.vsep().is_some(), "the split is back:\n{}", c.dump());
+    // `sleep` is typed again, waiting for Enter, in the right-hand pane
+    // that had the focus, below the old text that shows it once already.
+    c.wait_for("the typed command", |s| s.iter().filter(|l| l.contains("$ sleep 300")).count() == 2);
+    c.key(Key::new(KeyCode::Char('u'), CTRL));
+    c.run("pwd");
+    c.wait_for("the old directory", |s| s.iter().any(|l| l.contains("/work") && !l.contains("cd ")));
+    // The empty session made for this client is gone; only `main` is left.
+    let list = h.stdout(&["ls"]);
+    assert!(list.starts_with("main:") && list.lines().count() == 1, "{list}");
+}
+
+#[test]
+fn sessions_come_back_after_the_server_dies() {
+    let h = Harness::new();
+    let _c = build_sessions_to_lose(&h);
+    let pid = h.server_pid();
+    // SAFETY: plain signal to a process this test started.
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    h.wait_server_gone(pid);
+    restore_and_check(&h);
+}
+
+#[test]
+fn sessions_come_back_after_a_reboot() {
+    let h = Harness::new();
+    let _c = build_sessions_to_lose(&h);
+    let pid = h.server_pid();
+    // A reboot ends everything at once: the shells and the server.
+    for shell in h.shell_pids(pid) {
+        unsafe { libc::kill(shell, libc::SIGKILL) };
+    }
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    h.wait_server_gone(pid);
+    restore_and_check(&h);
+}
+
+#[test]
+fn unnamed_sessions_keep_their_number() {
+    let h = Harness::new();
+    // An unnamed session is `0`, like the one a new server makes for its
+    // first client.
+    assert!(h.nerdmux(&["new", "-d"]).status.success());
+    assert!(h.nerdmux(&["kill-session", "-t", "main"]).status.success());
+    h.wait_snapshot(&["name = \"0\""]);
+    let crash = |h: &Harness| {
+        let pid = h.server_pid();
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        h.wait_server_gone(pid);
+        h.start_server();
+    };
+    let sessions =
+        |h: &Harness| h.stdout(&["ls"]).lines().map(|l| l.split(':').next().unwrap().to_string()).collect::<Vec<_>>();
+
+    crash(&h);
+    let mut c = h.connect(80, 24, Request::Attach { target: None, create: true });
+    c.wait_text("Restore sessions?");
+    c.code(KeyCode::Enter);
+    c.wait_gone("Restore sessions?");
+    c.pump(Duration::from_millis(200));
+    assert_eq!(sessions(&h), ["0"]);
+
+    // Starting fresh first, then restoring: the name is taken by then.
+    h.wait_snapshot(&["name = \"0\""]);
+    drop(c);
+    crash(&h);
+    let mut c = h.connect(80, 24, Request::Attach { target: None, create: true });
+    c.wait_text("Restore sessions?");
+    c.code(KeyCode::Esc);
+    c.wait_gone("Restore sessions?");
+    assert!(h.nerdmux(&["action", "restore-sessions"]).status.success());
+    c.wait_text("Restore sessions?");
+    c.code(KeyCode::Enter);
+    c.wait_gone("Restore sessions?");
+    c.pump(Duration::from_millis(200));
+    let mut names = sessions(&h);
+    names.sort();
+    assert_eq!(names, ["0", "0-2"]);
+}
+
+#[test]
+fn nothing_is_offered_after_a_clean_exit() {
+    let h = Harness::new();
+    let mut c = h.attach(80, 24);
+    c.run("echo kept-''once");
+    h.wait_snapshot(&["kept-once"]);
+    let pid = h.server_pid();
+    let out = h.nerdmux(&["kill-server"]);
+    assert!(out.status.success());
+    h.wait_server_gone(pid);
+    assert!(h.snapshot().is_none(), "kill-server leaves no snapshot");
+
+    // Leaving the last shell is a clean end too, after a short wait.
+    h.start_server();
+    let mut c = h.connect(80, 24, Request::Attach { target: None, create: true });
+    c.wait_for("the shell prompt", |s| s.iter().any(|l| l.starts_with('$')));
+    c.pump(Duration::from_millis(300));
+    assert!(!c.screen().join("\n").contains("Restore sessions?"), "{}", c.dump());
+    h.wait_snapshot(&["sessions"]);
+    let pid = h.server_pid();
+    c.run("exit");
+    h.wait_server_gone(pid);
+    assert!(h.snapshot().is_none(), "the snapshot outlived a clean exit");
+    let restorable = h.dir.join(".local/state/nerdmux");
+    let left: Vec<_> = std::fs::read_dir(&restorable).map(|d| d.filter_map(|e| e.ok()).collect()).unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[test]
