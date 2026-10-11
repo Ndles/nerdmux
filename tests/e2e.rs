@@ -158,33 +158,15 @@ impl Harness {
 
     /// The server's process id, found by its command line.
     fn server_pid(&self) -> i32 {
-        let socket = self.socket().to_string_lossy().into_owned();
-        std::fs::read_dir("/proc")
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let pid: i32 = e.file_name().to_str()?.parse().ok()?;
-                let cmd = std::fs::read(e.path().join("cmdline")).ok()?;
-                let args: Vec<String> =
-                    cmd.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
-                (args.iter().any(|a| a == "__server") && args.contains(&socket)).then_some(pid)
-            })
-            .next()
-            .expect("server process")
+        let pattern = format!("__server {}", self.socket().display());
+        let out = Command::new("pgrep").args(["-f", &pattern]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().next().and_then(|l| l.trim().parse().ok()).expect("server process")
     }
 
     /// Processes the server started: the panes' shells.
     fn shell_pids(&self, server: i32) -> Vec<i32> {
-        std::fs::read_dir("/proc")
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let pid: i32 = e.file_name().to_str()?.parse().ok()?;
-                let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
-                let ppid: i32 = stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()?;
-                (ppid == server).then_some(pid)
-            })
-            .collect()
+        let out = Command::new("pgrep").args(["-P", &server.to_string()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect()
     }
 
     /// Wait for the server to be gone, socket and process.
@@ -1354,9 +1336,17 @@ fn build_sessions_to_lose(h: &Harness) -> Client {
     c.wait_for("a second window", |s| s.last().unwrap().contains("2 "));
     c.run(&format!("less {}", h.dir.join("notes.txt").display()));
     c.wait_text("notes-content");
-    h.wait_snapshot(&["before-crash", "\"sleep\"", "\"less\"", "/work"]);
+    let mut expected = vec!["before-crash", "/work"];
+    if PROGRAMS_COME_BACK {
+        expected.extend(["\"sleep\"", "\"less\""]);
+    }
+    h.wait_snapshot(&expected);
     c
 }
+
+/// Running programs are found through /proc, so only Linux restores them;
+/// elsewhere panes come back with their directory and text.
+const PROGRAMS_COME_BACK: bool = cfg!(target_os = "linux");
 
 /// Restore what `build_sessions_to_lose` made, through the picker that a
 /// new server offers, and check it came back.
@@ -1366,15 +1356,18 @@ fn restore_and_check(h: &Harness) {
     c.wait_text("Restore sessions?");
     assert!(c.screen().join("\n").contains("2 windows, 3 panes"), "{}", c.dump());
     c.code(KeyCode::Enter);
-    // The second window had the focus and runs `less` again.
-    c.wait_text("notes-content");
-    assert!(c.status().contains("main"), "{}", c.status());
+    c.wait_for("the restored session", |s| s.last().unwrap().contains("main"));
+    if PROGRAMS_COME_BACK {
+        // The second window had the focus and runs `less` again.
+        c.wait_text("notes-content");
+    }
     c.prefix('1');
     c.wait_text("before-crash");
     assert!(c.vsep().is_some(), "the split is back:\n{}", c.dump());
     // `sleep` is typed again, waiting for Enter, in the right-hand pane
     // that had the focus, below the old text that shows it once already.
-    c.wait_for("the typed command", |s| s.iter().filter(|l| l.contains("$ sleep 300")).count() == 2);
+    let typed = if PROGRAMS_COME_BACK { 2 } else { 1 };
+    c.wait_for("the typed command", |s| s.iter().filter(|l| l.contains("$ sleep 300")).count() == typed);
     c.key(Key::new(KeyCode::Char('u'), CTRL));
     c.run("pwd");
     c.wait_for("the old directory", |s| s.iter().any(|l| l.contains("/work") && !l.contains("cd ")));
