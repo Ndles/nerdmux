@@ -6,6 +6,8 @@
 </picture>
 </p>
 
+<p align="center">Linux · macOS · <a href="LICENSE">MIT license</a></p>
+
 ![nerdmux: panes, windows, detach and reattach, sessions](docs/demo/nerdmux.gif)
 
 A terminal multiplexer in one binary: windows (tabs), split panes, and sessions that outlive the terminal, and even a
@@ -15,8 +17,6 @@ nerdmux is opinionated by design, with keys that work like a game's controls: mo
 for panes, `Alt+Shift` for windows and sessions), and every action is the leader, `Alt+Space`, followed by the first
 letter of what it does. No modes, nothing to memorize, and your shell keeps its own `Alt+letter` keys. It looks finished
 out of the box, in warm charcoal and amber, and a settings panel changes anything on the spot.
-
-Runs on Linux and macOS.
 
 ## Build
 
