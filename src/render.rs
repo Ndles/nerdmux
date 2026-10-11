@@ -1096,7 +1096,8 @@ fn draw_confirm(buf: &mut Buffer, cols: u16, rows: u16, confirm: &Confirm, theme
 /// `secs` since the Unix epoch as local time: "Oct 11 14:02".
 fn local_time(secs: u64) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    let t = secs as libc::time_t;
+    // The type of time_t differs between platforms; let it be inferred.
+    let t = secs.try_into().unwrap_or(0);
     // SAFETY: `tm` is plain data and localtime_r only writes into it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
