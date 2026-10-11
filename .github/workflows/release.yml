@@ -1,4 +1,5 @@
-# Tests on Linux and macOS, then builds release archives for four targets.
+# Tests on Linux and macOS, then builds release archives for Linux (x86_64,
+# aarch64) and macOS on Apple Silicon.
 # A tag `v*` publishes them as a GitHub release (a pre-release when the tag
 # has a `-`, like v0.1.0-rc.1). Started by hand ("Run workflow"), it only
 # builds; the archives are attached to the run:
@@ -35,9 +36,7 @@ jobs:
           # Static binaries that run on any Linux distribution.
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-latest }
-          # The Intel build is made on the Apple Silicon runner.
           - { target: aarch64-apple-darwin, os: macos-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
     runs-on: ${{ matrix.os }}
     env:
       # Rust's own linker cross-links the static aarch64 build; no C toolchain needed.
