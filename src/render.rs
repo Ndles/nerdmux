@@ -944,6 +944,32 @@ fn draw_picker(buf: &mut Buffer, cols: u16, rows: u16, picker: &mut Picker, them
     typing.then_some(cursor)
 }
 
+/// "NërdMUX 0.1.0 · Pavel Kuksa · MIT · github.com/…", from Cargo.toml,
+/// centered between `x` and `limit`. The ë is amber, like the glasses over
+/// it in the logo. Parts that do not fit are left out from the end.
+fn draw_about(buf: &mut Buffer, x: u16, y: u16, limit: u16, theme: &Theme) {
+    let body = Style::default().bg(theme.popup_bg);
+    let repo = env!("CARGO_PKG_REPOSITORY");
+    let authors = env!("CARGO_PKG_AUTHORS").replace(':', ", ");
+    let parts =
+        [env!("CARGO_PKG_VERSION"), &authors, env!("CARGO_PKG_LICENSE"), repo.strip_prefix("https://").unwrap_or(repo)];
+    let room = limit.saturating_sub(x);
+    let mut tail = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        let next = if i == 0 { format!(" {part}") } else { format!(" · {part}") };
+        if 7 + text_width(&tail) + text_width(&next) > room {
+            break;
+        }
+        tail.push_str(&next);
+    }
+    let x = x + room.saturating_sub(7 + text_width(&tail)) / 2;
+    let mut x = put(buf, x, y, "N", limit, body.fg(theme.fg).add_modifier(Modifier::BOLD));
+    x = put(buf, x, y, "ë", limit, body.fg(theme.accent).add_modifier(Modifier::BOLD));
+    x = put(buf, x, y, "rd", limit, body.fg(theme.fg).add_modifier(Modifier::BOLD));
+    x = put(buf, x, y, "MUX", limit, body.fg(theme.dim));
+    put(buf, x, y, &tail, limit, body.fg(theme.dim));
+}
+
 fn draw_settings(
     buf: &mut Buffer,
     cols: u16,
@@ -999,7 +1025,12 @@ fn draw_settings(
         }
         lines.push(Line::Row(i));
     }
-    let height = (inner.height - 2) as usize;
+    // The last two rows: a divider and the about line.
+    let height = (inner.height - 4) as usize;
+    for sx in inner.x..limit {
+        put(buf, sx, inner.y + inner.height - 2, "─", limit, body.fg(theme.border));
+    }
+    draw_about(buf, inner.x, inner.y + inner.height - 1, limit, theme);
     let at = lines.iter().position(|l| matches!(l, Line::Row(i) if *i == panel.selected)).unwrap_or(0);
     // Keep the selection visible, and its heading too when it is the first row.
     let want = if at > 0 && matches!(lines[at - 1], Line::Head(_)) { at - 1 } else { at };

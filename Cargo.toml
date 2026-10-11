@@ -5,6 +5,7 @@ authors = ["Pavel Kuksa"]
 edition = "2021"
 description = "A terminal multiplexer with built-in sessions, windows, panes and easy keyboard navigation"
 license = "MIT"
+repository = "https://github.com/Ndles/nerdmux"
 rust-version = "1.85"
 readme = "README.md"
 

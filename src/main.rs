@@ -127,6 +127,7 @@ fn main() {
         }
         "-V" | "--version" | "version" => {
             println!("nerdmux {}", env!("CARGO_PKG_VERSION"));
+            println!("{}", env!("CARGO_PKG_REPOSITORY"));
             return;
         }
         "keys" => {

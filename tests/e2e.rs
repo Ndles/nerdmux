@@ -1483,6 +1483,8 @@ fn settings_panel_edits_the_config_file() {
     c.wait_for("a split", |s| s[1].contains('▕'));
     c.prefix(',');
     c.wait_text("Enter change");
+    // The about line, from Cargo.toml.
+    c.wait_text(&format!("NërdMUX {} · Pavel Kuksa · MIT · github.com/Ndles/nerdmux", env!("CARGO_PKG_VERSION")));
 
     // A number: Enter opens it for typing.
     c.typed("delay");
