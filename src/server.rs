@@ -1043,7 +1043,10 @@ impl Server {
         let fallback = self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id);
         let affected: Vec<ClientId> = self.clients.values().filter(|c| c.session == sid).map(|c| c.id).collect();
         for cid in affected {
-            match fallback {
+            // Back to the session the client came from, if it is still there.
+            let previous = self.clients.get(&cid).and_then(|c| c.last_session);
+            let next = previous.filter(|p| self.sessions.iter().any(|s| s.id == *p)).or(fallback);
+            match next {
                 Some(next) => {
                     self.switch_client(cid, next);
                     if let Some(c) = self.clients.get_mut(&cid) {
@@ -1060,6 +1063,36 @@ impl Server {
             }
         }
         self.dirty = true;
+    }
+
+    /// Client `cid` closes session `sid`: it goes back to the session it came
+    /// from, or the most recently used one, and when `sid` was the last,
+    /// to a fresh session, which takes over the name if it was a number.
+    fn close_session(&mut self, cid: ClientId, sid: SessionId) {
+        if self.sessions.len() > 1 {
+            self.remove_session(sid);
+            return;
+        }
+        let Some(old) = self.sessions.iter().find(|s| s.id == sid) else { return };
+        let (env, cwd, name) = (old.env.clone(), old.cwd.to_string_lossy().into_owned(), old.name.clone());
+        let (cols, rows) = self.clients.get(&cid).map_or((80, 24), |c| (c.cols, c.rows));
+        let fresh = match self.create_session(None, Vec::new(), cwd, env, cols, rows) {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                self.message(Some(cid), format!("cannot start a new session: {e}"));
+                return;
+            }
+        };
+        self.switch_client(cid, fresh);
+        self.remove_session(sid);
+        if name.parse::<u32>().is_ok() {
+            if let Some(s) = self.sessions.iter_mut().find(|s| s.id == fresh) {
+                s.name = name;
+            }
+        }
+        if let Some(c) = self.clients.get_mut(&cid) {
+            c.last_session = None;
+        }
     }
 
     fn remove_window(&mut self, sid: SessionId, wid: WindowId) {
@@ -1632,7 +1665,7 @@ impl Server {
             match pending {
                 Pending::KillPane(p) => self.close_pane(p),
                 Pending::KillWindow(s, w) => self.remove_window(s, w),
-                Pending::KillSession(s) => self.remove_session(s),
+                Pending::KillSession(s) => self.close_session(cid, s),
             }
         }
         if let Some(n) = pane_number {

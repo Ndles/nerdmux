@@ -1193,6 +1193,42 @@ fn panes_can_keep_the_terminals_own_colors() {
 }
 
 #[test]
+fn closing_a_session_goes_back_or_starts_afresh() {
+    let h = Harness::new();
+    assert!(h.nerdmux(&["new", "-d", "-s", "other"]).status.success());
+    let mut c = h.attach(100, 30);
+    let session = |c: &Client| c.status().split_whitespace().next().unwrap_or_default().to_string();
+    let close = |c: &mut Client| {
+        c.key(Key::alt(' '));
+        c.typed("X");
+        c.wait_text("Kill session");
+        c.typed("y");
+        c.wait_gone("Kill session");
+    };
+
+    // From main, a new session; closing it goes back to main, where the
+    // client came from, rather than to `other`.
+    c.prefix('S');
+    c.wait_text("New session name");
+    c.typed("work");
+    c.code(KeyCode::Enter);
+    c.wait_for("the new session", |s| s.last().unwrap().trim_start().starts_with("work"));
+    close(&mut c);
+    c.wait_for("back in main", |s| s.last().unwrap().trim_start().starts_with("main"));
+
+    // Closing the others leaves the last one; closing that starts a fresh
+    // session instead of ending nerdmux.
+    assert!(h.nerdmux(&["kill-session", "-t", "other"]).status.success());
+    c.run("echo old-''shell");
+    c.wait_text("old-shell");
+    close(&mut c);
+    c.wait_gone("old-shell");
+    c.wait_for("a shell in the fresh session", |s| s.iter().any(|l| l.starts_with('$')));
+    assert_eq!(session(&c), "0");
+    assert_eq!(h.stdout(&["ls"]).trim(), "0: 1 window, 1 pane (attached)");
+}
+
+#[test]
 fn session_manager_creates_renames_and_kills() {
     let h = Harness::new();
     let mut c = h.attach(100, 30);

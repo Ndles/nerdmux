@@ -552,6 +552,7 @@ pub fn default_prefix_table() -> Table {
         (c('f'), Switcher),
         (c('S'), NewSession),
         (c('N'), RenameSession),
+        (c('X'), KillSession),
         (c('d'), Detach),
         // Copy & paste
         (c('c'), CopyMode),
