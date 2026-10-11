@@ -172,7 +172,8 @@ impl Harness {
     /// Wait for the server to be gone, socket and process.
     fn wait_server_gone(&self, pid: i32) {
         let start = Instant::now();
-        while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        // SAFETY: signal 0 only asks whether the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 {
             assert!(start.elapsed() < TIMEOUT, "server did not exit");
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -482,8 +483,9 @@ fn windows_can_be_created_selected_and_renamed() {
     c.code(KeyCode::Enter);
     c.wait_for("the new name in the status bar", |s| s.last().unwrap().contains("1 editor"));
 
-    // Clicking a tab selects it.
-    let col = c.status().find("2 sh").map(|b| c.status()[..b].chars().count()).unwrap() as u16;
+    // Clicking a tab selects it. Its title is the program's name, which on
+    // macOS turns from `sh` into `bash`, so look for the number.
+    let col = c.status().find(" 2 ").map(|b| c.status()[..b].chars().count() + 1).unwrap() as u16;
     c.click(col, 23);
     c.wait_text("second-20");
 }
