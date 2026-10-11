@@ -1,4 +1,10 @@
-# nerdmux
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo/nerdmux-on-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="docs/logo/nerdmux-on-light.svg">
+    <img alt="nerdmux" src="docs/logo/nerdmux-card-dark.svg" width="320">
+  </picture>
+</h1>
 
 ![nerdmux: panes, windows, detach and reattach, sessions](docs/demo/nerdmux.gif)
 
