@@ -107,4 +107,4 @@ tmux and Zellij are both excellent; nerdmux makes different choices.
 
 ## License
 
-MIT
+MIT © 2026 Pavel Kuksa. See [LICENSE](LICENSE).
