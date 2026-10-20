@@ -5,7 +5,7 @@ use crate::proto::Key;
 use ratatui::style::Color;
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +35,14 @@ pub struct Theme {
     /// Text drawn on top of `accent` or another badge color.
     pub accent_fg: Color,
     pub border: Color,
+    /// The status bar's background; with `status_stops`, its first stop.
     pub status_bg: Color,
+    /// Two or more colors the status bar fades through from left to right.
+    /// Empty: a plain `status_bg`.
+    pub status_stops: Vec<Color>,
+    /// Colors the focused pane's outline fades through, top left to bottom
+    /// right. Empty: the accent.
+    pub frame: Vec<Color>,
     pub status_fg: Color,
     pub dim: Color,
     /// Key names, tab numbers.
@@ -87,6 +94,8 @@ impl Default for Theme {
             accent_fg: rgb(0x15120F),
             border: rgb(0x3A322A),
             status_bg: rgb(0x1D1915),
+            status_stops: Vec::new(),
+            frame: Vec::new(),
             status_fg: rgb(0xB59A72),
             dim: rgb(0x7A6E60),
             cyan: rgb(0x7FB4A8),
@@ -200,6 +209,39 @@ struct RawKeys {
     direct: BTreeMap<String, String>,
 }
 
+/// A theme file: a `[theme]` table and nothing else.
+#[derive(Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+struct ThemeFile {
+    theme: BTreeMap<String, ThemeValue>,
+}
+
+/// Themes built into the binary, picked by `theme.base`.
+pub const BUILTIN_THEMES: &[(&str, &str)] = &[("synthwave", include_str!("../themes/synthwave.toml"))];
+
+/// Where your own themes live: `themes/` next to the config file.
+pub fn themes_dir() -> PathBuf {
+    let path = config_path();
+    path.parent().unwrap_or(Path::new(".")).join("themes")
+}
+
+/// The text of the theme called `name`: `<dir>/<name>.toml` first, then the
+/// built-in themes.
+fn find_theme(name: &str, dir: Option<&Path>) -> Result<String, String> {
+    if let Some(dir) = dir.filter(|_| !name.contains(['/', '\\']) && !name.is_empty()) {
+        let path = dir.join(format!("{name}.toml"));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => return Ok(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        }
+    }
+    match BUILTIN_THEMES.iter().find(|(n, _)| *n == name) {
+        Some((_, text)) => Ok(text.to_string()),
+        None => Err(format!("no theme named {name:?}")),
+    }
+}
+
 pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("NERDMUX_CONFIG") {
         return PathBuf::from(p);
@@ -247,7 +289,7 @@ impl Config {
     pub fn load() -> Config {
         let path = config_path();
         match std::fs::read_to_string(&path) {
-            Ok(text) => Config::from_toml(&text),
+            Ok(text) => Config::from_toml_in(&text, Some(&themes_dir())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => {
                 let mut c = Config::default();
@@ -257,7 +299,13 @@ impl Config {
         }
     }
 
+    /// Parse a config file; `theme.base` finds only the built-in themes.
     pub fn from_toml(text: &str) -> Config {
+        Config::from_toml_in(text, None)
+    }
+
+    /// Parse a config file whose `theme.base` may also name a theme in `themes`.
+    pub fn from_toml_in(text: &str, themes: Option<&Path>) -> Config {
         let mut c = Config::default();
         let raw: Raw = match toml_edit::de::from_str(text) {
             Ok(r) => r,
@@ -322,49 +370,30 @@ impl Config {
         if let Some(b) = raw.extended_keys {
             c.extended_keys = b;
         }
-        for (name, value) in &raw.theme {
-            let t = &mut c.theme;
-            match (name.as_str(), value) {
-                ("own_palette", ThemeValue::Bool(b)) => {
-                    t.own_palette = *b;
-                    continue;
-                }
-                ("palette", ThemeValue::List(items)) => {
-                    let colors: Vec<Color> = items.iter().filter_map(parse_color).collect();
-                    match <[Color; 16]>::try_from(colors) {
-                        Ok(p) => t.palette = p,
-                        Err(_) => c.warnings.push("config: theme.palette needs exactly 16 colors".into()),
+        match raw.theme.get("base") {
+            None => {}
+            Some(ThemeValue::Text(name)) if name == "default" => {}
+            Some(ThemeValue::Text(name)) => match find_theme(name, themes) {
+                Ok(text) => match toml_edit::de::from_str::<ThemeFile>(&text) {
+                    Ok(mut file) => {
+                        if file.theme.remove("base").is_some() {
+                            c.warnings.push(format!("theme {name:?}: a theme cannot have a base of its own"));
+                        }
+                        let origin = format!("theme {name:?}");
+                        apply_theme(&mut c.theme, &file.theme, &origin, &mut c.warnings);
                     }
-                    continue;
-                }
-                _ => {}
-            }
-            let Some(color) = parse_color(value) else {
-                c.warnings.push(format!("config: bad color for theme.{name}"));
-                continue;
-            };
-            match name.as_str() {
-                "bg" | "background" => t.bg = color,
-                "inactive_bg" => t.inactive_bg = color,
-                "fg" | "foreground" => t.fg = color,
-                "cursor" => t.cursor = color,
-                "accent" => t.accent = color,
-                "accent_fg" => t.accent_fg = color,
-                "border" => t.border = color,
-                "status_bg" => t.status_bg = color,
-                "status_fg" => t.status_fg = color,
-                "dim" => t.dim = color,
-                "cyan" => t.cyan = color,
-                "magenta" => t.magenta = color,
-                "green" => t.green = color,
-                "purple" => t.purple = color,
-                "red" => t.red = color,
-                "yellow" => t.yellow = color,
-                "popup_bg" => t.popup_bg = color,
-                "popup_fg" => t.popup_fg = color,
-                _ => c.warnings.push(format!("config: unknown theme color {name:?}")),
-            }
+                    Err(e) => {
+                        let first = e.message().lines().next().unwrap_or("syntax error").to_string();
+                        c.warnings.push(format!("theme {name:?} ignored: {first}"));
+                    }
+                },
+                Err(e) => c.warnings.push(format!("config: {e}")),
+            },
+            Some(_) => c.warnings.push("config: theme.base needs a theme name".into()),
         }
+        let mut own = raw.theme;
+        own.remove("base");
+        apply_theme(&mut c.theme, &own, "config", &mut c.warnings);
         let mut warnings = Vec::new();
         let mut apply = |table: &mut Table, entries: &BTreeMap<String, String>, which: &str| {
             for (key, action) in entries {
@@ -383,6 +412,73 @@ impl Config {
         apply(&mut c.direct_table, &raw.keys.direct, "direct");
         c.warnings.extend(warnings);
         c
+    }
+}
+
+/// The stops of a gradient: two or more colors, each one valid.
+fn stops(items: &[ThemeValue]) -> Option<Vec<Color>> {
+    let colors: Vec<Color> = items.iter().map(parse_color).collect::<Option<_>>()?;
+    (colors.len() >= 2).then_some(colors)
+}
+
+/// Set the colors in `entries` on `t`; `origin` names the file in warnings.
+fn apply_theme(t: &mut Theme, entries: &BTreeMap<String, ThemeValue>, origin: &str, warnings: &mut Vec<String>) {
+    for (name, value) in entries {
+        match (name.as_str(), value) {
+            ("own_palette", ThemeValue::Bool(b)) => {
+                t.own_palette = *b;
+                continue;
+            }
+            ("palette", ThemeValue::List(items)) => {
+                let colors: Vec<Color> = items.iter().filter_map(parse_color).collect();
+                match <[Color; 16]>::try_from(colors) {
+                    Ok(p) => t.palette = p,
+                    Err(_) => warnings.push(format!("{origin}: theme.palette needs exactly 16 colors")),
+                }
+                continue;
+            }
+            ("status_bg", ThemeValue::List(items)) => {
+                match stops(items) {
+                    Some(s) => (t.status_bg, t.status_stops) = (s[0], s),
+                    None => warnings.push(format!("{origin}: theme.status_bg needs a color or 2+ colors")),
+                }
+                continue;
+            }
+            ("frame", ThemeValue::List(items)) => {
+                match stops(items) {
+                    Some(s) => t.frame = s,
+                    None => warnings.push(format!("{origin}: theme.frame needs a color or 2+ colors")),
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let Some(color) = parse_color(value) else {
+            warnings.push(format!("{origin}: bad color for theme.{name}"));
+            continue;
+        };
+        match name.as_str() {
+            "bg" | "background" => t.bg = color,
+            "inactive_bg" => t.inactive_bg = color,
+            "fg" | "foreground" => t.fg = color,
+            "cursor" => t.cursor = color,
+            "accent" => t.accent = color,
+            "accent_fg" => t.accent_fg = color,
+            "border" => t.border = color,
+            "status_bg" => (t.status_bg, t.status_stops) = (color, Vec::new()),
+            "frame" => t.frame = vec![color],
+            "status_fg" => t.status_fg = color,
+            "dim" => t.dim = color,
+            "cyan" => t.cyan = color,
+            "magenta" => t.magenta = color,
+            "green" => t.green = color,
+            "purple" => t.purple = color,
+            "red" => t.red = color,
+            "yellow" => t.yellow = color,
+            "popup_bg" => t.popup_bg = color,
+            "popup_fg" => t.popup_fg = color,
+            _ => warnings.push(format!("{origin}: unknown theme color {name:?}")),
+        }
     }
 }
 
@@ -407,6 +503,7 @@ restore = true               # after a crash or reboot, offer to bring the sessi
 term = "xterm-256color"      # $TERM inside panes
 
 [theme]                      # "#rrggbb", a 0-255 palette index, or a color name
+# base = "synthwave"         # start from a theme: built in, or themes/<name>.toml here; colors below override it
 own_palette = true           # false: panes keep your terminal's own colors
 bg = "#15120F"               # warm charcoal; the terminal's padding is tinted to match
 inactive_bg = "#0E0C0A"      # darker background for panes without the focus
@@ -417,6 +514,8 @@ magenta = "#C98A8F"          # dusty rose: headings, prefix badge, selected text
 green = "#A3B57A"            # sage: messages, copy badge, search matches
 purple = "#A894B8"           # mauve: zoom badge, pane numbers
 red = "#D0705E"              # brick: bells, sync badge
+# status_bg = ["#1D1915", "#2A2118"]      # two or more colors fade across the status bar
+# frame = ["#E8A23A", "#C98A8F"]          # ...or across the focused pane's outline (default: accent)
 # palette = ["#2A241E", "#D0705E", ...]   # all 16 ANSI colors, black to bright white
 
 [keys.direct]                # chords pressed on their own
@@ -495,6 +594,66 @@ mod tests {
         let c = Config::from_toml("[theme]\npalette = [1, 2, 3]\n");
         assert_eq!(c.warnings.len(), 1);
         assert_eq!(c.theme.palette, Theme::default().palette);
+    }
+
+    #[test]
+    fn builtin_themes_load_cleanly() {
+        for (name, text) in BUILTIN_THEMES {
+            let c = Config::from_toml(text);
+            assert!(c.warnings.is_empty(), "{name}: {:?}", c.warnings);
+            assert_ne!(c.theme, Theme::default(), "{name} changes nothing");
+            let based = Config::from_toml(&format!("[theme]\nbase = {name:?}\n"));
+            assert!(based.warnings.is_empty(), "{name}: {:?}", based.warnings);
+            assert_eq!(based.theme, c.theme);
+        }
+    }
+
+    #[test]
+    fn colors_next_to_base_override_it() {
+        let c = Config::from_toml("[theme]\nbase = \"synthwave\"\naccent = \"#00ff00\"\n");
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.theme.accent, Color::Rgb(0, 0xff, 0));
+        assert_eq!(c.theme.bg, Color::Rgb(0x14, 0x0F, 0x24));
+    }
+
+    #[test]
+    fn base_looks_in_the_themes_dir_first() {
+        let dir = std::env::temp_dir().join(format!("nerdmux-themes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("synthwave.toml"), "[theme]\nbg = \"#010203\"\n").unwrap();
+        std::fs::write(dir.join("nested.toml"), "[theme]\nbase = \"synthwave\"\n").unwrap();
+        let c = Config::from_toml_in("[theme]\nbase = \"synthwave\"\n", Some(&dir));
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.theme.bg, Color::Rgb(1, 2, 3));
+        assert_eq!(c.theme.accent, Theme::default().accent);
+        let c = Config::from_toml_in("[theme]\nbase = \"nested\"\n", Some(&dir));
+        assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gradients() {
+        let c = Config::from_toml("[theme]\nstatus_bg = [\"#000000\", \"#ffffff\"]\nframe = \"red\"\n");
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.theme.status_bg, Color::Rgb(0, 0, 0));
+        assert_eq!(c.theme.status_stops.len(), 2);
+        assert_eq!(c.theme.frame, vec![Color::Indexed(1)]);
+        // A plain color next to `base` drops the base's gradient.
+        let c = Config::from_toml("[theme]\nbase = \"synthwave\"\nstatus_bg = \"#000000\"\n");
+        assert!(c.theme.status_stops.is_empty());
+        let c = Config::from_toml("[theme]\nstatus_bg = [\"#000000\"]\nframe = [\"red\", 999]\n");
+        assert_eq!(c.warnings.len(), 2, "{:?}", c.warnings);
+        assert_eq!(c.theme, Theme::default());
+    }
+
+    #[test]
+    fn unknown_base_is_a_warning() {
+        let c = Config::from_toml("[theme]\nbase = \"vaporwave\"\naccent = \"red\"\n");
+        assert_eq!(c.warnings.len(), 1, "{:?}", c.warnings);
+        assert_eq!(c.theme.accent, Color::Indexed(1));
+        let c = Config::from_toml("[theme]\nbase = \"default\"\n");
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+        assert_eq!(c.theme, Theme::default());
     }
 
     #[test]

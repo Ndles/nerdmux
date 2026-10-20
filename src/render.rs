@@ -210,6 +210,71 @@ fn badge(theme: &Theme, bg: Color) -> Style {
     Style::default().fg(theme.accent_fg).bg(bg).add_modifier(Modifier::BOLD)
 }
 
+/// The color at `t` (0 to 1) along evenly spaced `stops`, blended in OKLCH:
+/// lightness and chroma move straight, the hue takes the short way round, so
+/// a fade between two vivid colors stays vivid instead of passing gray. None when there is no
+/// gradient: fewer than two stops, or a stop that is not "#rrggbb".
+fn gradient(stops: &[Color], t: f32) -> Option<Color> {
+    if stops.len() < 2 {
+        return None;
+    }
+    let lab: Vec<[f32; 3]> = stops
+        .iter()
+        .map(|c| match c {
+            Color::Rgb(r, g, b) => Some(oklab([*r, *g, *b])),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let pos = t.clamp(0.0, 1.0) * (lab.len() - 1) as f32;
+    let i = (pos as usize).min(lab.len() - 2);
+    let f = pos - i as f32;
+    let lch = |[l, a, b]: [f32; 3]| [l, a.hypot(b), b.atan2(a)];
+    let (mut a, mut b) = (lch(lab[i]), lch(lab[i + 1]));
+    // A gray stop has no hue of its own: borrow the other one's.
+    const GRAY: f32 = 0.02;
+    if a[1] < GRAY {
+        a[2] = b[2];
+    } else if b[1] < GRAY {
+        b[2] = a[2];
+    }
+    let tau = std::f32::consts::TAU;
+    let turn = (b[2] - a[2] + tau * 1.5).rem_euclid(tau) - tau / 2.0;
+    let (l, c, h) = (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + turn * f);
+    let [r, g, b] = from_oklab([l, c * h.cos(), c * h.sin()]);
+    Some(Color::Rgb(r, g, b))
+}
+
+fn oklab([r, g, b]: [u8; 3]) -> [f32; 3] {
+    let lin = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    };
+    let (r, g, b) = (lin(r), lin(g), lin(b));
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+    [
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    ]
+}
+
+fn from_oklab([l, a, b]: [f32; 3]) -> [u8; 3] {
+    let l_ = (l + 0.3963377774 * a + 0.2158037573 * b).powi(3);
+    let m_ = (l - 0.1055613458 * a - 0.0638541728 * b).powi(3);
+    let s_ = (l - 0.0894841775 * a - 1.2914855480 * b).powi(3);
+    let srgb = |c: f32| {
+        let c = if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (c.clamp(0.0, 1.0) * 255.0).round() as u8
+    };
+    [
+        srgb(4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_),
+        srgb(-1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_),
+        srgb(-0.0041960771 * l_ - 0.7034186930 * m_ + 1.7076147740 * s_),
+    ]
+}
+
 // ===== panes ================================================================
 
 /// Translate a color from a pane's program into one for the client's
@@ -451,15 +516,22 @@ fn draw_borders(buf: &mut Buffer, area: Rect, geom: &Geometry, active: PaneId, t
     if act.width == 0 || act.height == 0 {
         return;
     }
-    let hot = Style::default().fg(theme.accent);
+    let (left, top) = (act.x as i32 - 1, act.y as i32 - 1);
+    let (right, bottom) = (act.x as i32 + act.width as i32, act.y as i32 + act.height as i32);
+    // The outline's color: the accent, or a fade from its top left corner
+    // to its bottom right one.
+    let plain = theme.frame.first().copied().unwrap_or(theme.accent);
+    let (span_x, span_y) = ((right - left).max(1) as f32, (bottom - top).max(1) as f32);
+    let hot = |x: i32, y: i32| {
+        let t = ((x - left) as f32 / span_x + (y - top) as f32 / span_y) / 2.0;
+        Style::default().fg(gradient(&theme.frame, t).unwrap_or(plain))
+    };
     let mut mark = |x: i32, y: i32, glyph: &str| {
         let (gx, gy) = (x - area.x as i32, y - area.y as i32);
         if gx >= 0 && gy >= 0 && (gx as usize) < w && (gy as usize) < h && border[gy as usize * w + gx as usize] {
-            put(buf, x as u16, y as u16, glyph, x as u16 + 1, hot);
+            put(buf, x as u16, y as u16, glyph, x as u16 + 1, hot(x, y));
         }
     };
-    let (left, top) = (act.x as i32 - 1, act.y as i32 - 1);
-    let (right, bottom) = (act.x as i32 + act.width as i32, act.y as i32 + act.height as i32);
     for x in left + 1..right {
         mark(x, top, "▁");
         mark(x, bottom, "▔");
@@ -593,6 +665,19 @@ fn draw_status(buf: &mut Buffer, y: u16, cols: u16, info: &StatusInfo, tabs: &mu
     let mut rx = right_start;
     for (text, style) in &right {
         rx = put(buf, rx, y, text, cols, *style);
+    }
+
+    // A fading status bar: repaint the bar's own background, leaving badges.
+    if gradient(&theme.status_stops, 0.0).is_some() {
+        let span = cols.saturating_sub(1).max(1) as f32;
+        for x in 0..cols {
+            let cell = &mut buf[(x, y)];
+            if cell.bg == theme.status_bg {
+                if let Some(c) = gradient(&theme.status_stops, x as f32 / span) {
+                    cell.set_bg(c);
+                }
+            }
+        }
     }
 }
 
@@ -1947,5 +2032,18 @@ mod tests {
             draw_which_key(&mut buf, Rect::new(0, 0, w, h), &config);
             draw_arrange_hint(&mut buf, Rect::new(0, 0, w, h), &theme);
         }
+    }
+
+    #[test]
+    fn gradients_blend_between_stops() {
+        let (pink, cyan) = (Color::Rgb(0xFF, 0x2E, 0x97), Color::Rgb(0x36, 0xF9, 0xF6));
+        assert_eq!(gradient(&[pink, cyan], 0.0), Some(pink));
+        assert_eq!(gradient(&[pink, cyan], 1.0), Some(cyan));
+        assert_eq!(gradient(&[pink, Color::Rgb(0, 0, 0), cyan], 0.5), Some(Color::Rgb(0, 0, 0)));
+        // The middle of a fade between two vivid colors is not gray.
+        let Some(Color::Rgb(r, g, b)) = gradient(&[pink, cyan], 0.5) else { panic!() };
+        assert!(r.max(g).max(b) - r.min(g).min(b) > 60, "{r} {g} {b}");
+        assert_eq!(gradient(&[pink], 0.5), None);
+        assert_eq!(gradient(&[pink, Color::Indexed(4)], 0.5), None);
     }
 }

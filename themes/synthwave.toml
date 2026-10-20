@@ -1,0 +1,51 @@
+# Synthwave: neon on a midnight-purple sky, a loud counterpart to the warm
+# default. Hot pink leads; electric cyan, laser green and sunset yellow back it.
+#
+# Built into nerdmux. Turn it on in ~/.config/nerdmux/config.toml:
+#
+#   [theme]
+#   base = "synthwave"
+#   accent = "#36F9F6"     # anything set next to `base` overrides the theme
+#
+# To make your own theme, copy this file to ~/.config/nerdmux/themes/<name>.toml
+# and set base = "<name>". A theme there wins over a built-in one with the same
+# name. It sets every color the theme knows, so it doubles as a reference.
+#
+# `status_bg` and `frame` take one color or a list of them: two or more
+# "#rrggbb" colors make a gradient. A terminal without true color shows it
+# in coarser bands.
+
+[theme]                      # "#rrggbb", a 0-255 palette index, or a color name
+own_palette = true           # paint panes with the colors below
+
+# Panes
+bg = "#140F24"               # midnight purple; the terminal's padding is tinted to match
+inactive_bg = "#0D0A18"      # panes without the focus fade into the night
+fg = "#F0E4FC"               # lavender white
+cursor = "#FF2E97"           # hot pink, like the accent
+
+# Chrome
+accent = "#FF2E97"           # hot pink: focus, active tab, frames
+accent_fg = "#140F24"        # text on top of the accent and other badges
+border = "#3B2A5E"           # pane borders
+frame = ["#FF2E97", "#B48CFF", "#36F9F6"]   # focused pane: pink to ultraviolet to cyan
+status_bg = ["#2A1650", "#3D1655", "#521A4E"]   # status bar: a dusk fading left to right
+status_fg = "#B39DDB"
+dim = "#6E5E94"              # hints, inactive tabs, secondary text
+popup_bg = "#1A1230"         # key guide, settings panel, pickers
+popup_fg = "#F0E4FC"
+
+# Badges and highlights
+cyan = "#36F9F6"             # electric cyan: key names, tab numbers
+magenta = "#FF7EDB"          # neon orchid: headings, prefix badge, selected text
+green = "#72F1B8"            # laser green: messages, copy badge, search matches
+purple = "#B48CFF"           # ultraviolet: zoom badge, pane numbers
+red = "#FE4450"              # neon red: bells, sync badge
+yellow = "#FFC66D"           # sunset gold
+
+# The 16 ANSI colors programs in panes use (ls, git, prompts, editors),
+# black to bright white.
+palette = [
+  "#241B3D", "#FE4450", "#72F1B8", "#FFC66D", "#7B6CFF", "#FF7EDB", "#36F9F6", "#E6DCF5",
+  "#6E5E94", "#FF6B7A", "#9CFFD3", "#FFD98F", "#A193FF", "#FFA6E9", "#8AFFFD", "#FFFFFF",
+]

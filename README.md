@@ -85,6 +85,11 @@ own_palette = false         # keep your terminal's colors inside panes
 "e" = "split-right"
 ```
 
+To switch the whole look, start from a theme: `base = "synthwave"` under `[theme]` picks the built-in neon one, and any
+color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes/<name>.toml`;
+[themes/synthwave.toml](themes/synthwave.toml) sets every color nerdmux knows, including the gradients `status_bg` and
+`frame` can take, and makes a good starting point.
+
 ## Things worth knowing
 
 - **Alt on macOS.** Terminal.app and iTerm2 keep `Alt` (Option) to themselves until "Use Option as Meta key" is turned
