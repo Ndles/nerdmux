@@ -66,6 +66,7 @@ fn spawn_server(socket: &Path) -> anyhow::Result<()> {
         .open(socket.with_extension("log"))?;
     let exe = std::env::current_exe().context("cannot find my own executable")?;
     let mut cmd = Command::new(exe);
+    cmd.env_clear().envs(host_env());
     cmd.arg("__server").arg(socket).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
     // SAFETY: setsid is async-signal-safe; it detaches the server from this
     // terminal so closing the terminal does not take the sessions with it.
@@ -173,12 +174,42 @@ fn convert_mouse(m: event::MouseEvent) -> Option<Mouse> {
     Some(Mouse { kind, col: m.column, row: m.row, mods })
 }
 
+/// Our environment as the server and the panes should see it.
+fn host_env() -> Vec<(String, String)> {
+    let env = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+    outside_snap(env)
+}
+
+/// A terminal installed as a snap (Alacritty from the Snap Store, say) starts
+/// us inside the snap's environment: its own GIO modules, which make
+/// gsettings read only the defaults, its graphics drivers, its cache. Leave
+/// all of that to the snap, so the server and the panes see the system.
+pub fn outside_snap(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let get = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).filter(|v| !v.is_empty());
+    let Some(snap) = get("SNAP") else { return env };
+    let mut roots: Vec<String> = [Some(snap), get("SNAP_USER_DATA"), get("SNAP_USER_COMMON")]
+        .into_iter()
+        .flatten()
+        .map(|r| format!("{}/", r.trim_end_matches('/')))
+        .collect();
+    roots.push("/var/lib/snapd/lib/".into());
+    let in_snap = |entry: &str| roots.iter().any(|r| entry.starts_with(r.as_str()) || format!("{entry}/") == *r);
+    env.into_iter()
+        .filter(|(k, _)| !k.starts_with("SNAP") && k != "__EGL_VENDOR_LIBRARY_DIRS")
+        .filter_map(|(k, v)| {
+            let kept: Vec<&str> = v.split(':').filter(|e| !in_snap(e)).collect();
+            match kept.len() {
+                n if n == v.split(':').count() => Some((k, v)),
+                0 => None,
+                _ => Some((k, kept.join(":"))),
+            }
+        })
+        .collect()
+}
+
 fn hello(request: Request, cols: u16, rows: u16) -> C2S {
     let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| "/".into());
-    let env = std::env::vars_os()
-        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .filter(|(k, _)| k != "NERDMUX" && k != "NERDMUX_PANE")
-        .collect();
+    let env = host_env().into_iter().filter(|(k, _)| k != "NERDMUX" && k != "NERDMUX_PANE").collect();
     C2S::Hello { version: PROTOCOL_VERSION, cols, rows, cwd, env, request }
 }
 
@@ -320,5 +351,43 @@ pub fn run(socket: &Path, request: Request) -> anyhow::Result<i32> {
             Err(e) if e.is::<ServerGone>() && attempt < 3 => thread::sleep(Duration::from_millis(150)),
             other => return other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_snap_keeps_its_environment_to_itself() {
+        let out = outside_snap(env(&[
+            ("SNAP", "/snap/alacritty/180"),
+            ("SNAP_USER_COMMON", "/home/u/snap/alacritty/common"),
+            ("GIO_MODULE_DIR", "/home/u/snap/alacritty/common/.cache/gio-modules"),
+            ("XDG_CACHE_HOME", "/home/u/snap/alacritty/common/.cache"),
+            ("LD_LIBRARY_PATH", "/usr/local/cuda/lib64:/snap/alacritty/180/usr/lib/dri"),
+            ("XDG_DATA_DIRS", "/snap/alacritty/180/usr/share:/usr/share:/var/lib/snapd/desktop"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("ALACRITTY_WINDOW_ID", "7"),
+        ]));
+        assert_eq!(
+            out,
+            env(&[
+                ("LD_LIBRARY_PATH", "/usr/local/cuda/lib64"),
+                ("XDG_DATA_DIRS", "/usr/share:/var/lib/snapd/desktop"),
+                ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+                ("ALACRITTY_WINDOW_ID", "7"),
+            ])
+        );
+    }
+
+    #[test]
+    fn outside_a_snap_nothing_changes() {
+        let e = env(&[("PATH", "/usr/bin:/snap/bin"), ("HOME", "/home/u")]);
+        assert_eq!(outside_snap(e.clone()), e);
     }
 }
