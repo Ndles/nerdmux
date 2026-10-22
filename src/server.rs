@@ -72,33 +72,53 @@ pub struct Window {
 }
 
 impl Window {
-    /// Where the split layout goes inside the window `area`. With two or
-    /// more panes a one-cell frame is kept free around them, so the focused
-    /// pane can be outlined on every side, even along the screen edge.
-    pub fn layout_area(&self, area: Rect) -> Rect {
-        if self.layout.count() < 2 {
-            area
-        } else {
-            framed(area)
-        }
+    /// Where the split layout goes inside the window `area`.
+    pub fn layout_area(&self, area: Rect, pad: Pad) -> Rect {
+        pane_area(area, pad, self.layout.count())
     }
 
-    pub fn geometry(&self, area: Rect) -> Geometry {
+    pub fn geometry(&self, area: Rect, pad: Pad) -> Geometry {
         if self.zoomed {
-            Geometry { panes: vec![(self.active, area)], seps: Vec::new() }
+            Geometry { panes: vec![(self.active, pane_area(area, pad, 1))], seps: Vec::new() }
         } else {
-            self.layout.geometry(self.layout_area(area))
+            self.layout.geometry(self.layout_area(area, pad))
         }
     }
 }
 
-/// `area` less a one-cell frame, unless it is too small to spare one.
-pub fn framed(area: Rect) -> Rect {
-    if area.width < 8 || area.height < 5 {
-        area
-    } else {
-        Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2)
+/// Cells kept free around the panes: `padding` columns either side and
+/// `padding_rows` rows on the edge away from the status bar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pad {
+    pub x: u16,
+    pub top: u16,
+    pub bottom: u16,
+}
+
+impl Pad {
+    pub fn new(config: &Config) -> Pad {
+        let (x, y) = (config.padding, config.padding_rows);
+        match config.status {
+            StatusPos::Top => Pad { x, top: 0, bottom: y },
+            _ => Pad { x, top: y, bottom: 0 },
+        }
     }
+}
+
+/// Where the panes of a window with `count` of them go inside `area`.
+/// Several panes keep a ring of one cell around them, so the focused one can
+/// be outlined on every side; where there is padding, the ring takes its
+/// outer cells, so the text starts in the same place with one pane or many.
+pub fn pane_area(area: Rect, pad: Pad, count: usize) -> Rect {
+    // A small terminal keeps every cell for the panes.
+    let x = if area.width < pad.x.saturating_mul(2).saturating_add(20) { 0 } else { pad.x };
+    let (mut top, mut bottom) = (pad.top, pad.bottom);
+    if area.height < top.saturating_add(bottom).saturating_add(8) {
+        (top, bottom) = (0, 0);
+    }
+    let ring = count >= 2 && area.width >= 8 && area.height >= 5;
+    let (x, top, bottom) = if ring { (x.max(1), top.max(1), bottom.max(1)) } else { (x, top, bottom) };
+    Rect::new(area.x + x, area.y + top, area.width - 2 * x, area.height - top - bottom)
 }
 
 pub struct Session {
@@ -237,21 +257,14 @@ pub struct Server {
     snap: restore::SnapState,
 }
 
-/// Where windows are drawn inside a `cols` x `rows` terminal: `padding`
-/// columns in from either side, and `padding_rows` rows from the edge the
-/// status bar does not take.
-pub fn window_area(status: StatusPos, padding: u16, padding_rows: u16, cols: u16, rows: u16) -> Rect {
-    let area = match status {
+/// Where windows are drawn inside a `cols` x `rows` terminal.
+pub fn window_area(status: StatusPos, cols: u16, rows: u16) -> Rect {
+    match status {
         StatusPos::Off => Rect::new(0, 0, cols, rows),
         _ if rows < 2 => Rect::new(0, 0, cols, rows),
         StatusPos::Top => Rect::new(0, 1, cols, rows - 1),
         StatusPos::Bottom => Rect::new(0, 0, cols, rows - 1),
-    };
-    // A small terminal keeps every cell for the panes.
-    let pad_x = if cols < padding.saturating_mul(2).saturating_add(20) { 0 } else { padding };
-    let pad_y = if area.height < padding_rows.saturating_add(8) { 0 } else { padding_rows };
-    let y = if status == StatusPos::Top { area.y } else { area.y + pad_y };
-    Rect::new(area.x + pad_x, y, area.width - 2 * pad_x, area.height - pad_y)
+    }
 }
 
 /// A path with the home directory written as `~`.
@@ -959,7 +972,7 @@ impl Server {
 
     fn session_area(&self, sid: SessionId) -> Option<Rect> {
         let s = self.sessions.iter().find(|s| s.id == sid)?;
-        Some(window_area(self.config.status, self.config.padding, self.config.padding_rows, s.cols, s.rows))
+        Some(window_area(self.config.status, s.cols, s.rows))
     }
 
     fn spawn_pane(
@@ -1056,7 +1069,7 @@ impl Server {
             let Some(area) = self.session_area(sid) else { continue };
             let Some(session) = self.sessions.iter().find(|s| s.id == sid) else { continue };
             for w in &session.windows {
-                for (pid, rect) in w.geometry(area).panes {
+                for (pid, rect) in w.geometry(area, Pad::new(&self.config)).panes {
                     if let Some(p) = self.panes.get_mut(&pid) {
                         p.resize(rect.width, rect.height);
                     }
@@ -1266,7 +1279,8 @@ impl Server {
         let Some(session) = self.sessions.iter().find(|s| s.id == sid) else { return };
         let window = session.window();
         let active = window.active;
-        let rect = window.layout.geometry(window.layout_area(area)).rect_of(active).unwrap_or(area);
+        let pad = Pad::new(&self.config);
+        let rect = window.layout.geometry(window.layout_area(area, pad)).rect_of(active).unwrap_or(area);
         // Terminal cells are roughly twice as tall as wide.
         let axis = axis.unwrap_or(if rect.width as u32 >= rect.height as u32 * 5 / 2 {
             Axis::Horizontal
@@ -1285,7 +1299,7 @@ impl Server {
         // at the right size instead of being resized a moment later.
         let mut preview = window.layout.clone();
         preview.split(active, axis, PaneId::MAX);
-        let size = preview.geometry(framed(area)).rect_of(PaneId::MAX).unwrap_or(rect);
+        let size = preview.geometry(pane_area(area, pad, 2)).rect_of(PaneId::MAX).unwrap_or(rect);
         let cwd = if self.config.inherit_cwd { self.panes.get(&active).and_then(|p| p.cwd()) } else { None };
         let pid = match self.spawn_pane(sid, size.width, size.height, None, cwd) {
             Ok(pid) => pid,
@@ -1892,7 +1906,7 @@ impl Server {
 
         let Some(area) = self.session_area(sid) else { return };
         let Some(session) = self.sessions.iter().find(|s| s.id == sid) else { return };
-        let geom = session.window().geometry(area);
+        let geom = session.window().geometry(area, Pad::new(&self.config));
         let local = |rect: Rect| {
             let col = m.col.clamp(rect.x, rect.x + rect.width.saturating_sub(1)) - rect.x;
             let row = m.row.clamp(rect.y, rect.y + rect.height.saturating_sub(1)) - rect.y;
@@ -2144,7 +2158,7 @@ impl Server {
             }
             Action::Focus(dir) => {
                 let w = self.sessions[sidx].window();
-                let area = w.layout_area(area);
+                let area = w.layout_area(area, Pad::new(&self.config));
                 let geom = w.layout.geometry(area);
                 let panes = &self.panes;
                 let rank = |id: PaneId| panes.get(&id).map(|p| p.last_focus).unwrap_or(0);
@@ -2182,7 +2196,7 @@ impl Server {
             }
             Action::Swap(dir) => {
                 let w = self.sessions[sidx].window_mut();
-                let area = w.layout_area(area);
+                let area = w.layout_area(area, Pad::new(&self.config));
                 let geom = w.layout.geometry(area);
                 let panes = &self.panes;
                 let rank = |id: PaneId| panes.get(&id).map(|p| p.last_focus).unwrap_or(0);
@@ -2208,7 +2222,7 @@ impl Server {
             }
             Action::Resize(dir, n) => {
                 let w = self.sessions[sidx].window_mut();
-                let area = w.layout_area(area);
+                let area = w.layout_area(area, Pad::new(&self.config));
                 if !w.zoomed && w.layout.resize(area, active, dir, n) {
                     w.preset = None;
                     self.relayout(sid);

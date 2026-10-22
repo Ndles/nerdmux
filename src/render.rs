@@ -467,6 +467,7 @@ fn draw_borders(buf: &mut Buffer, area: Rect, geom: &Geometry, active: PaneId, t
         return;
     }
     let (w, h) = (area.width as usize, area.height as usize);
+    // Cells no pane covers: the separators, and the ring and padding around.
     let mut border = vec![true; w * h];
     for (_, r) in &geom.panes {
         for y in r.y..r.y + r.height {
@@ -478,17 +479,18 @@ fn draw_borders(buf: &mut Buffer, area: Rect, geom: &Geometry, active: PaneId, t
             }
         }
     }
-    // The outer frame, if the layout kept one.
-    let inner = crate::server::framed(area);
-    let framed = inner != area;
-    let on_frame = |x: i32, y: i32| framed && (x == 0 || y == 0 || x == w as i32 - 1 || y == h as i32 - 1);
+    // Separators are the free cells between panes, inside the box they span.
+    let inner = geom.panes.iter().map(|(_, r)| *r).reduce(|a, b| a.union(b)).unwrap_or(area);
+    let (x0, y0) = ((inner.x - area.x) as i32, (inner.y - area.y) as i32);
+    let (x1, y1) = (x0 + inner.width as i32, y0 + inner.height as i32);
     let is = |x: i32, y: i32| {
-        x >= 0
-            && y >= 0
+        x >= x0
+            && y >= y0
+            && x < x1
+            && y < y1
             && (x as usize) < w
             && (y as usize) < h
             && border[y as usize * w + x as usize]
-            && !on_frame(x, y)
     };
     let normal = Style::default().fg(theme.border);
     for gy in 0..h {
@@ -1322,9 +1324,9 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
         // terminal underneath is set to.
         fill(&mut buf, Rect::new(0, 0, cols, rows), Style::default().fg(theme.fg).bg(theme.bg));
     }
-    let area = window_area(config.status, config.padding, config.padding_rows, session.cols, session.rows);
+    let area = window_area(config.status, session.cols, session.rows);
     let window = session.window();
-    let geom = window.geometry(area);
+    let geom = window.geometry(area, crate::server::Pad::new(config));
 
     // A client larger than the session shows the unused part as dots.
     if cols > session.cols || rows > session.rows {

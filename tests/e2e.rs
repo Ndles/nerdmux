@@ -427,6 +427,23 @@ fn padding_keeps_panes_off_the_edges() {
 }
 
 #[test]
+fn padding_holds_the_focus_outline_when_split() {
+    let h = Harness::with_config("padding = 1\npadding_rows = 1");
+    let mut c = h.attach(100, 30);
+    c.run("echo one-$((0+1))");
+    c.wait_text("one-1");
+    let col = c.col_of("one-1").unwrap();
+    let row = c.screen().iter().position(|l| l.trim_start().starts_with('$')).unwrap();
+    c.prefix('\\');
+    c.wait_for("the outline", |s| s.iter().any(|l| l.contains("▔▔▔")));
+    // The outline takes the padding: the left pane's text stays where it was,
+    // and nothing else is pushed in from the edges.
+    assert_eq!(c.col_of("one-1"), Some(col), "text moved when the window split:\n{}", c.dump());
+    assert!(c.screen()[row].trim_start().starts_with('$'), "the first row moved:\n{}", c.dump());
+    assert!(c.screen()[row - 1].contains("▁▁▁"), "the top edge belongs in the padding row:\n{}", c.dump());
+}
+
+#[test]
 fn splits_and_directional_focus() {
     let h = Harness::new();
     let mut c = h.attach(100, 30);
