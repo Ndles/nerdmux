@@ -27,7 +27,10 @@ python3 docs/demo/make_demo.py --only 4   # record up to scene 4 and keep that c
 Everything happens in `/tmp/nerdmux-demo`: its own server socket, config,
 `$HOME` and a throwaway git project, `~/shop`. Your sessions, aliases and
 prompt are untouched and never appear in the GIF; nvim and lazygit keep
-your configuration. Running it from inside nerdmux is fine.
+your configuration, except that nvim's background is cleared so any
+colorscheme sits on the nerdmux theme, and lazygit gets a state of its own
+so its first-run and release-notes popups never cover a scene. Running it
+from inside nerdmux is fine.
 
 ## How it works
 

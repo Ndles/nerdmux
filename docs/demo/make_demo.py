@@ -143,8 +143,14 @@ SCENES = [
 DEMORC = r"""
 # Shell for the demo panes: no personal aliases or prompt.
 unalias -a
-export PS1='\[\e[1;38;2;232;162;58m\]⁘\[\e[0m\] '
+export PS1='\[\e[1;38;2;232;162;58m\]∷\[\e[0m\] '
 export LESS=-R GIT_PAGER=cat HISTFILE=/dev/null
+# nvim keeps your configuration but shows the terminal's background, so any
+# colorscheme sits on the nerdmux theme.
+# lazygit keeps your configuration too, with a state of its own that has
+# already shown the first-run popup.
+alias lazygit='XDG_STATE_HOME="$HOME/.demo-state" lazygit'
+alias nvim='nvim -c "hi Normal guibg=NONE | hi NormalNC guibg=NONE | hi NormalFloat guibg=NONE | hi SignColumn guibg=NONE | hi LineNr guibg=NONE | hi EndOfBuffer guibg=NONE | hi MsgArea guibg=NONE"'
 cd "$DEMO_PROJECT"
 """
 
@@ -192,6 +198,13 @@ def prepare():
         git("add", name)
         git("commit", "-q", "-m", message)
     (WORK / "demorc").write_text(DEMORC)
+    (WORK / ".demo-state/lazygit").mkdir(parents=True)
+    # Seen the intro and this version's notes, so no popup covers the scene.
+    info = subprocess.run(["lazygit", "--version"], capture_output=True, text=True).stdout
+    version = next((p[len("version="):] for p in info.split(", ") if p.startswith("version=")), "")
+    (WORK / ".demo-state/lazygit/state.yml").write_text(
+        f"startuppopupversion: 999\nlastversion: {version}\n"
+    )
     (WORK / "config.toml").write_text(
         f'shell = "/bin/bash"\nshell_args = ["--rcfile", "{WORK}/demorc", "-i"]\n'
     )
