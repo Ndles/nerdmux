@@ -213,6 +213,8 @@ pub struct Client {
 
 pub struct Server {
     pub config: Config,
+    /// GNOME held Alt+Space on the desktop the last client attached from.
+    gnome_took_leader: bool,
     pub sessions: Vec<Session>,
     pub panes: HashMap<PaneId, Pane>,
     pub clients: BTreeMap<ClientId, Client>,
@@ -235,14 +237,21 @@ pub struct Server {
     snap: restore::SnapState,
 }
 
-/// Where windows are drawn inside a `cols` x `rows` terminal.
-pub fn window_area(status: StatusPos, cols: u16, rows: u16) -> Rect {
-    match status {
+/// Where windows are drawn inside a `cols` x `rows` terminal: `padding`
+/// columns in from either side, and `padding_rows` rows from the edge the
+/// status bar does not take.
+pub fn window_area(status: StatusPos, padding: u16, padding_rows: u16, cols: u16, rows: u16) -> Rect {
+    let area = match status {
         StatusPos::Off => Rect::new(0, 0, cols, rows),
         _ if rows < 2 => Rect::new(0, 0, cols, rows),
         StatusPos::Top => Rect::new(0, 1, cols, rows - 1),
         StatusPos::Bottom => Rect::new(0, 0, cols, rows - 1),
-    }
+    };
+    // A small terminal keeps every cell for the panes.
+    let pad_x = if cols < padding.saturating_mul(2).saturating_add(20) { 0 } else { padding };
+    let pad_y = if area.height < padding_rows.saturating_add(8) { 0 } else { padding_rows };
+    let y = if status == StatusPos::Top { area.y } else { area.y + pad_y };
+    Rect::new(area.x + pad_x, y, area.width - 2 * pad_x, area.height - pad_y)
 }
 
 /// A path with the home directory written as `~`.
@@ -260,6 +269,26 @@ pub fn window_title(win: &Window, panes: &HashMap<PaneId, Pane>) -> String {
         Some(n) => n.clone(),
         None => panes.get(&win.active).map(|p| p.name.clone()).unwrap_or_default(),
     }
+}
+
+/// The leader used while GNOME holds Alt+Space.
+const GNOME_LEADER: Key = Key::ctrl(' ');
+
+/// GNOME binds Alt+Space to the window menu and takes it before the
+/// terminal sees it. Only asked of a desktop the client sits on, not over
+/// ssh; `None` when the client is not on a GNOME desktop.
+fn gnome_takes_alt_space(env: &[(String, String)]) -> Option<bool> {
+    let get = |name: &str| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    let gnome = get("XDG_CURRENT_DESKTOP").is_some_and(|d| d.to_ascii_lowercase().contains("gnome"));
+    if !gnome || get("SSH_CONNECTION").is_some() || !find_in_path("gsettings") {
+        return None;
+    }
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.wm.keybindings", "activate-window-menu"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).to_ascii_lowercase().contains("<alt>space"))
 }
 
 fn find_in_path(program: &str) -> bool {
@@ -316,6 +345,7 @@ impl Server {
         let now = Instant::now();
         let mut server = Server {
             config: Config::load(),
+            gnome_took_leader: false,
             sessions: Vec::new(),
             panes: HashMap::new(),
             clients: BTreeMap::new(),
@@ -635,6 +665,9 @@ impl Server {
             let _ = link.send(S2C::Exit { message, code });
         };
         let caps = Caps::detect(&env);
+        let attaching =
+            matches!(request, Request::New { detached: false, .. } | Request::Attach { .. } | Request::Restore);
+        let gnome = if attaching { gnome_takes_alt_space(&env) } else { None };
         match request {
             Request::List => {
                 let mut out = String::new();
@@ -735,6 +768,23 @@ impl Server {
                 let cid = self.clients.values().find(|c| c.session == sid).map(|c| c.id);
                 self.run_action(cid, sid, action);
                 reply(String::new(), 0);
+            }
+        }
+        if let Some(taken) = gnome {
+            self.gnome_took_leader = taken;
+            self.pick_leader();
+            let text = match (taken, self.config.prefix_chosen) {
+                (true, false) => Some(format!(
+                    "GNOME keeps Alt+Space for its window menu, so the leader is {} here",
+                    keys::key_label(GNOME_LEADER)
+                )),
+                (true, true) if self.config.prefix == Key::alt(' ') => {
+                    Some("GNOME keeps Alt+Space for its window menu: free it, or set another prefix".to_string())
+                }
+                _ => None,
+            };
+            if let (Some(text), Some(c)) = (text, self.clients.get_mut(&id)) {
+                c.message = Some((text, Instant::now() + MESSAGE_TIME * 3));
             }
         }
     }
@@ -909,7 +959,7 @@ impl Server {
 
     fn session_area(&self, sid: SessionId) -> Option<Rect> {
         let s = self.sessions.iter().find(|s| s.id == sid)?;
-        Some(window_area(self.config.status, s.cols, s.rows))
+        Some(window_area(self.config.status, self.config.padding, self.config.padding_rows, s.cols, s.rows))
     }
 
     fn spawn_pane(
@@ -923,6 +973,7 @@ impl Server {
         let id = self.id();
         let focus = self.bump();
         let session = self.sessions.iter().find(|s| s.id == sid).ok_or("no such session")?;
+        let mut env = session.env.clone();
         let command = command.unwrap_or_else(|| {
             let shell = self
                 .config
@@ -933,6 +984,16 @@ impl Server {
                 .unwrap_or_else(|| "/bin/sh".to_string());
             let mut argv = vec![shell];
             argv.extend(self.config.shell_args.iter().cloned());
+            if self.config.prompt {
+                let dir = Path::new(&self.socket).with_extension("shell");
+                if std::fs::create_dir_all(&dir).is_ok() {
+                    let mut sgr = b"\\e[1".to_vec();
+                    crate::render::push_color(&mut sgr, self.config.theme.accent, true, true);
+                    sgr.push(b'm');
+                    let sgr = String::from_utf8_lossy(&sgr);
+                    crate::prompt::wrap(&mut argv, &mut env, &dir, &sgr, &self.config.prompt_mark);
+                }
+            }
             argv
         });
         let program = command[0].clone();
@@ -941,7 +1002,7 @@ impl Server {
             rows,
             command,
             cwd: cwd.or_else(|| Some(session.cwd.clone())),
-            env: &session.env,
+            env: &env,
             term: &self.config.term,
             scrollback: self.config.scrollback,
             socket: &self.socket,
@@ -2330,11 +2391,20 @@ impl Server {
         }
     }
 
+    /// The default leader, Alt+Space, unless GNOME holds it on the desktop
+    /// the last client attached from. A leader from the config always wins.
+    fn pick_leader(&mut self) {
+        if !self.config.prefix_chosen {
+            self.config.prefix = if self.gnome_took_leader { GNOME_LEADER } else { Key::alt(' ') };
+        }
+    }
+
     /// Read the config file again and apply it everywhere. Returns the first
     /// problem found in it.
     fn reload_config(&mut self) -> Option<String> {
         let had_mouse = self.config.mouse;
         self.config = Config::load();
+        self.pick_leader();
         let mouse = self.config.mouse;
         let colors = self.terminal_colors();
         for c in self.clients.values_mut() {

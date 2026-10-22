@@ -60,6 +60,18 @@ impl Harness {
         let dir = PathBuf::from("/tmp").join(format!("nerdmux-e2e-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        // Panes start at the left edge, so the tests can read them by column.
+        let config = if config.contains("padding") {
+            config.to_string()
+        } else {
+            // Top-level keys must come before the first table.
+            let (head, tables): (Vec<&str>, Vec<&str>) = {
+                let lines: Vec<&str> = config.lines().collect();
+                let at = lines.iter().position(|l| l.trim_start().starts_with('[')).unwrap_or(lines.len());
+                (lines[..at].to_vec(), lines[at..].to_vec())
+            };
+            [head, vec!["padding = 0", "padding_rows = 0"], tables].concat().join("\n")
+        };
         std::fs::write(dir.join("config.toml"), config).unwrap();
         let h = Harness { dir, shell: shell.to_string() };
         let out = h.nerdmux(&["new", "-d", "-s", "main"]);
@@ -128,7 +140,7 @@ impl Harness {
 
     fn attach(&self, cols: u16, rows: u16) -> Client {
         let mut c = self.connect(cols, rows, Request::Attach { target: Some("main".into()), create: false });
-        c.wait_for("the shell prompt", |s| s.iter().any(|l| l.starts_with('$')));
+        c.wait_for("the shell prompt", |s| s.iter().any(|l| l.trim_start().starts_with('$')));
         c
     }
 }
@@ -398,6 +410,20 @@ fn attach_shows_shell_and_status_bar() {
     assert!(status.contains("main"), "status bar should name the session: {status:?}");
     assert!(status.contains("1 sh"), "status bar should list the window: {status:?}");
     assert_eq!(h.stdout(&["ls"]).trim(), "main: 1 window, 1 pane (attached)");
+}
+
+#[test]
+fn padding_keeps_panes_off_the_edges() {
+    let h = Harness::with_config("padding = 2");
+    let mut c = h.attach(80, 24);
+    c.run("echo hello-$((40+2))");
+    c.wait_text("hello-42");
+    let line = c.screen().into_iter().find(|l| l.contains("hello-42") && !l.contains("echo")).unwrap();
+    assert!(line.starts_with("  hello-42"), "output should start two columns in: {line:?}");
+    assert!(c.status().starts_with(" main"), "the status bar keeps its place: {:?}", c.status());
+    // One row is left free at the top, away from the status bar.
+    assert!(c.screen()[0].trim().is_empty(), "the top row should be empty: {:?}", c.screen()[0]);
+    assert!(c.screen()[1].trim_start().starts_with('$'), "the prompt starts on the second row: {}", c.dump());
 }
 
 #[test]
@@ -915,12 +941,16 @@ fn emoji_and_wide_text_stay_aligned() {
 fn sets_the_terminal_title() {
     let h = Harness::new();
     let mut c = h.attach(80, 24);
-    c.run("printf '\\033]2;custom-title\\007'");
+    // The shell's own title is ignored: shells set one at every prompt.
+    c.run("printf '\\033]2;shell-title\\007'");
+    // A program's counts while it is in the foreground.
+    c.run("sh -c \"printf '\\033]2;custom-title\\007'; sleep 1\"");
     let deadline = Instant::now() + TIMEOUT;
     loop {
         c.pump(Duration::from_millis(20));
         let raw = String::from_utf8_lossy(&c.raw).into_owned();
         if raw.contains("\x1b]2;main › sh\x07") && raw.contains("\x1b]2;main › custom-title\x07") {
+            assert!(!raw.contains("\x1b]2;main › shell-title"), "the shell's title was shown");
             break;
         }
         assert!(Instant::now() < deadline, "titles not seen in the output");

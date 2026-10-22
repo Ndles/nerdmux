@@ -247,7 +247,11 @@ fn gradient(stops: &[Color], t: f32) -> Option<Color> {
 fn oklab([r, g, b]: [u8; 3]) -> [f32; 3] {
     let lin = |c: u8| {
         let c = c as f32 / 255.0;
-        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
     };
     let (r, g, b) = (lin(r), lin(g), lin(b));
     let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
@@ -1318,7 +1322,7 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
         // terminal underneath is set to.
         fill(&mut buf, Rect::new(0, 0, cols, rows), Style::default().fg(theme.fg).bg(theme.bg));
     }
-    let area = window_area(config.status, session.cols, session.rows);
+    let area = window_area(config.status, config.padding, config.padding_rows, session.cols, session.rows);
     let window = session.window();
     let geom = window.geometry(area);
 
@@ -1449,7 +1453,7 @@ pub fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
     }
 }
 
-fn push_color(out: &mut Vec<u8>, color: Color, fg: bool, truecolor: bool) {
+pub(crate) fn push_color(out: &mut Vec<u8>, color: Color, fg: bool, truecolor: bool) {
     let base: u16 = if fg { 30 } else { 40 };
     let index = |i: u8, out: &mut Vec<u8>| {
         let _ = match i {

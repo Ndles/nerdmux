@@ -110,6 +110,12 @@ pub struct Pane {
     reaped: Arc<AtomicBool>,
     /// Title set by the program through OSC 0/2.
     pub title: String,
+    /// Process group that set `title`; the title is dropped once another
+    /// one takes the foreground.
+    title_owner: Option<i32>,
+    /// The pane runs a shell, whose own titles are ignored: shells set one
+    /// at every prompt ("user@host: dir"), and the program name says more.
+    shell: bool,
     /// Name of the foreground program, refreshed periodically.
     pub name: String,
     /// Working directory of the foreground program and the git branch
@@ -145,6 +151,11 @@ impl Pane {
         for k in ["COLUMNS", "LINES", "TERMCAP", "TMUX", "TMUX_PANE", "STY", "WINDOWID", "TERM_SESSION_ID"] {
             cmd.env_remove(k);
         }
+        // The outer terminal's identity: left in, shells load its integration
+        // (VTE's sets the title and prompt marks) and its tools reach past us.
+        for k in OUTER_TERMINAL_VARS {
+            cmd.env_remove(k);
+        }
         cmd.env("TERM", opts.term);
         cmd.env("TERM_PROGRAM", "nerdmux");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
@@ -158,6 +169,7 @@ impl Pane {
         drop(pair.slave);
         let pid = child.process_id();
         let name = base_name(&opts.command[0]);
+        let shell = SHELLS.contains(&name.as_str());
 
         let mut reader = pair.master.try_clone_reader()?;
         let reader_tx = tx.clone();
@@ -218,6 +230,8 @@ impl Pane {
             pid,
             reaped,
             title: String::new(),
+            title_owner: None,
+            shell,
             name,
             place: None,
             cols,
@@ -277,7 +291,15 @@ impl Pane {
         for event in pending {
             match event {
                 TermEvent::PtyWrite(text) => self.write(text.into_bytes()),
-                TermEvent::Title(t) => self.title = t,
+                TermEvent::Title(t) => {
+                    let owner = self.foreground_pid();
+                    if self.shell && owner == self.pid.map(|p| p as i32) {
+                        self.title.clear();
+                    } else {
+                        self.title = t;
+                        self.title_owner = owner;
+                    }
+                }
                 TermEvent::ResetTitle => self.title.clear(),
                 TermEvent::Bell => notices.push(Notice::Bell),
                 TermEvent::ClipboardStore(_, text) => notices.push(Notice::Clipboard(text)),
@@ -556,7 +578,12 @@ impl Pane {
             return false;
         }
         let mut changed = false;
-        match self.foreground_pid().and_then(procinfo::name) {
+        let fg = self.foreground_pid();
+        if !self.title.is_empty() && self.title_owner != fg {
+            self.title.clear();
+            changed = true;
+        }
+        match fg.and_then(procinfo::name) {
             Some(n) if n != self.name => {
                 self.name = n;
                 changed = true;
@@ -600,6 +627,34 @@ impl Drop for Pane {
         });
     }
 }
+
+/// Variables naming the terminal nerdmux runs in, kept out of panes.
+const OUTER_TERMINAL_VARS: &[&str] = &[
+    "VTE_VERSION",
+    "GNOME_TERMINAL_SCREEN",
+    "GNOME_TERMINAL_SERVICE",
+    "PTYXIS_VERSION",
+    "KONSOLE_VERSION",
+    "KONSOLE_DBUS_SERVICE",
+    "KONSOLE_DBUS_SESSION",
+    "KONSOLE_DBUS_WINDOW",
+    "ALACRITTY_WINDOW_ID",
+    "ALACRITTY_SOCKET",
+    "ALACRITTY_LOG",
+    "KITTY_WINDOW_ID",
+    "KITTY_PID",
+    "KITTY_PUBLIC_KEY",
+    "KITTY_LISTEN_ON",
+    "WEZTERM_PANE",
+    "WEZTERM_UNIX_SOCKET",
+    "WEZTERM_EXECUTABLE",
+    "ITERM_SESSION_ID",
+    "ITERM_PROFILE",
+    "WT_SESSION",
+    "WT_PROFILE_ID",
+];
+
+const SHELLS: &[&str] = &["bash", "zsh", "fish", "sh", "dash", "ksh", "mksh", "tcsh", "csh", "nu", "elvish", "xonsh"];
 
 fn base_name(path: &str) -> String {
     path.rsplit('/').next().unwrap_or(path).trim_start_matches('-').to_string()

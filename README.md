@@ -44,7 +44,8 @@ nerdmux                # attach to your last session, or start the first one
 | change settings                | `Alt+Space ,`                           |
 | leave, keeping it all running  | `Alt+Space d`                           |
 
-`Alt+Space ?` shows every key, and `nerdmux keys` prints them. The mouse works too: click to focus, drag borders to
+On GNOME, which keeps `Alt+Space` for itself, the leader is `Ctrl+Space` until you free it (see
+[Things worth knowing](#things-worth-knowing)). `Alt+Space ?` shows every key, and `nerdmux keys` prints them. The mouse works too: click to focus, drag borders to
 resize, drag to copy, scroll back with the wheel.
 
 ```sh
@@ -72,6 +73,8 @@ edits the file for you, keeping your comments. Everything is optional:
 ```toml
 prefix = "ctrl+a"           # the leader
 status = "top"              # "top", "bottom" or "off"
+padding = 1                 # empty columns beside the panes; 0 if your terminal pads already
+padding_rows = 1            # empty rows on the edge away from the status bar
 restore_programs = ["k9s"]  # also started again after a crash
 
 [theme]
@@ -94,8 +97,33 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
 
 - **Alt on macOS.** Terminal.app and iTerm2 keep `Alt` (Option) to themselves until "Use Option as Meta key" is turned
   on. Or pick a leader without it, such as `prefix = "ctrl+a"`.
+- **Alt+Space on GNOME.** `Alt+Space` is the intended leader: it sits under the thumb and no shell or editor uses it.
+  GNOME (Ubuntu, Fedora) keeps it for its window menu, though, and takes it before any terminal sees it. nerdmux does
+  not change desktop settings; when you attach from a GNOME desktop that holds the key, it uses `Ctrl+Space` instead
+  and says so in the status bar. To get `Alt+Space` back, free it in GNOME (the window menu stays on a right click of
+  the title bar), and nerdmux returns to it the next time you attach:
+
+  ```sh
+  gsettings set org.gnome.desktop.wm.keybindings activate-window-menu "[]"     # undo: gsettings reset ...
+  ```
+
+  A `prefix` in your config always wins, and nerdmux then only warns if GNOME holds it.
 - **Chords that collide.** `Alt+arrows` jump by word in some shell setups. Unbind what you miss with
   `"alt+left" = "none"`.
+- **The prompt.** Shells in panes (bash, zsh, fish) load your own startup files, aliases and all, then get a `∷` prompt
+  in the accent color, since the status bar already shows the directory and branch. Your dotfiles are not touched:
+  bash gets an `--rcfile` that reads `~/.bashrc` first, zsh a `ZDOTDIR` that hands back to yours, fish an
+  `--init-command`. `prompt_mark` picks another mark (`∷` is a math sign, so fonts center it on the line, and nearly
+  every monospace font has it), and `prompt = false` keeps your own prompt.
+- **The title.** nerdmux titles the terminal `session › program`. Titles a shell sets for itself at its prompt (Ubuntu's
+  `user@host: dir`) are ignored; a program's own, such as an editor's, shows while it runs. Variables that name the
+  outer terminal (`VTE_VERSION`, `GNOME_TERMINAL_SCREEN`, `KITTY_WINDOW_ID`, ...) are kept out of panes, so its shell
+  integration does not load inside them.
+- **Padding.** nerdmux keeps one empty column on either side of the panes and one empty row on the edge away from the
+  status bar, so text never touches the window edge in terminals without padding of their own, such as GNOME Terminal.
+  Where the terminal already pads (Omarchy's Alacritty), `padding = 0` and `padding_rows = 0` give the space back.
+  GNOME Terminal also shows a scrollbar by default; nerdmux keeps its own scrollback, so the bar has nothing to scroll
+  and can be turned off in the terminal's profile (Scrolling › Show scrollbar).
 - **Selecting text.** Hold `Shift` to use your terminal's own selection instead of nerdmux's.
 - **Nesting.** Starting nerdmux inside nerdmux is refused; use the session manager (`Alt+Space s`) to change session.
 

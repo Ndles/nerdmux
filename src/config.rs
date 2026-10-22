@@ -113,6 +113,8 @@ impl Default for Theme {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub prefix: Key,
+    /// The config file names the leader; nerdmux then never picks another.
+    pub prefix_chosen: bool,
     pub prefix_table: Table,
     pub direct_table: Table,
     pub shell: Option<String>,
@@ -121,12 +123,21 @@ pub struct Config {
     pub scrollback: usize,
     pub mouse: bool,
     pub status: StatusPos,
+    /// Empty columns left and right of the panes, so text never touches
+    /// the edge of a terminal that has no padding of its own.
+    pub padding: u16,
+    /// Empty rows on the edge away from the status bar.
+    pub padding_rows: u16,
     pub which_key_delay: Duration,
     pub repeat_time: Duration,
     pub copy_command: Option<String>,
     pub inherit_cwd: bool,
     pub dim_inactive: bool,
     pub set_title: bool,
+    /// Give new shells the nerdmux prompt, after their own startup files.
+    pub prompt: bool,
+    /// What that prompt shows.
+    pub prompt_mark: String,
     /// Ask the terminal for the kitty keyboard protocol (Super, Ctrl+Shift chords).
     pub extended_keys: bool,
     /// Keep a snapshot of the sessions and offer it back after a crash or reboot.
@@ -142,6 +153,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             prefix: Key::alt(' '),
+            prefix_chosen: false,
             prefix_table: keys::default_prefix_table(),
             direct_table: keys::default_direct_table(),
             shell: None,
@@ -150,12 +162,16 @@ impl Default for Config {
             scrollback: 10_000,
             mouse: true,
             status: StatusPos::Bottom,
+            padding: 1,
+            padding_rows: 1,
             which_key_delay: Duration::from_millis(400),
             repeat_time: Duration::from_millis(700),
             copy_command: None,
             inherit_cwd: true,
             dim_inactive: false,
             set_title: true,
+            prompt: true,
+            prompt_mark: crate::prompt::MARK.to_string(),
             extended_keys: true,
             restore: true,
             restore_programs: Vec::new(),
@@ -175,6 +191,8 @@ struct Raw {
     scrollback: Option<usize>,
     mouse: Option<bool>,
     status: Option<String>,
+    padding: Option<u16>,
+    padding_rows: Option<u16>,
     alt_bindings: Option<bool>,
     which_key_delay_ms: Option<u64>,
     repeat_time_ms: Option<u64>,
@@ -182,6 +200,8 @@ struct Raw {
     inherit_cwd: Option<bool>,
     dim_inactive: Option<bool>,
     set_title: Option<bool>,
+    prompt: Option<bool>,
+    prompt_mark: Option<String>,
     extended_keys: Option<bool>,
     restore: Option<bool>,
     restore_programs: Option<Vec<String>>,
@@ -317,7 +337,10 @@ impl Config {
         };
         if let Some(p) = raw.prefix {
             match keys::parse_key(&p) {
-                Some(k) => c.prefix = k,
+                Some(k) => {
+                    c.prefix = k;
+                    c.prefix_chosen = true;
+                }
                 None => c.warnings.push(format!("config: bad prefix key {p:?}")),
             }
         }
@@ -345,6 +368,12 @@ impl Config {
                 _ => c.warnings.push(format!("config: status must be top, bottom or off, not {s:?}")),
             }
         }
+        if let Some(n) = raw.padding {
+            c.padding = n.min(8);
+        }
+        if let Some(n) = raw.padding_rows {
+            c.padding_rows = n.min(4);
+        }
         if let Some(ms) = raw.which_key_delay_ms {
             c.which_key_delay = Duration::from_millis(ms);
         }
@@ -366,6 +395,17 @@ impl Config {
         }
         if let Some(b) = raw.set_title {
             c.set_title = b;
+        }
+        if let Some(b) = raw.prompt {
+            c.prompt = b;
+        }
+        if let Some(m) = raw.prompt_mark {
+            if crate::prompt::valid_mark(&m) {
+                c.prompt_mark = m;
+            } else {
+                c.warnings
+                    .push(format!("config: prompt_mark {m:?} must be 1-8 characters without quotes, \\, $, %, ! or `"));
+            }
         }
         if let Some(b) = raw.extended_keys {
             c.extended_keys = b;
@@ -484,12 +524,15 @@ fn apply_theme(t: &mut Theme, entries: &BTreeMap<String, ThemeValue>, origin: &s
 
 pub const EXAMPLE: &str = r##"# nerdmux configuration. Every setting is optional; the values shown are the defaults.
 
-prefix = "alt+space"         # the leader: press it, then a key (Alt+Space h lists them)
+# prefix = "alt+space"       # the leader: press it, then a key (Alt+Space ? lists them);
+                             # unset, it is ctrl+space where GNOME keeps alt+space
 # shell = "/bin/zsh"         # default: $SHELL
 # shell_args = ["-l"]        # extra arguments for the shell
 scrollback = 10000           # lines of history per pane (a full one takes roughly 25 MB)
 mouse = true                 # click to focus, drag borders, wheel to scroll, drag to copy
 status = "bottom"            # "top", "bottom" or "off"
+padding = 1                  # empty columns left and right of the panes (0 when the terminal pads already)
+padding_rows = 1             # empty rows on the edge away from the status bar
 alt_bindings = true          # set to false to drop the built-in chords (Alt+arrows, Alt+1-9, ...)
 extended_keys = true         # ask the terminal for Super and Ctrl+Shift chords (kitty protocol)
 which_key_delay_ms = 400     # how long after the prefix the key guide pops up
@@ -497,6 +540,8 @@ repeat_time_ms = 700         # window in which resize keys repeat without the pr
 inherit_cwd = true           # new panes start in the directory of the current pane
 dim_inactive = false         # fade the text of panes that do not have the focus
 set_title = true             # show "session › program" as the terminal's title
+prompt = true                # give new shells (bash, zsh, fish) the nerdmux prompt; false keeps your own
+prompt_mark = "∷"            # what that prompt shows, in the accent color
 restore = true               # after a crash or reboot, offer to bring the sessions back
 # restore_programs = ["k9s"] # started again on restore, besides nvim, less, htop, lazygit, ...
 # copy_command = "pbcopy"    # extra clipboard command; OSC 52 is always sent
@@ -539,6 +584,8 @@ mod tests {
         let c = Config::from_toml(EXAMPLE);
         assert!(c.warnings.is_empty(), "{:?}", c.warnings);
         assert_eq!(c.prefix, Key::alt(' '));
+        // Left unset, so nerdmux may step aside where GNOME holds Alt+Space.
+        assert!(!c.prefix_chosen);
         assert_eq!(c.prefix_table, keys::default_prefix_table());
         assert_eq!(c.direct_table, keys::default_direct_table());
         // The template documents the real defaults.
@@ -567,6 +614,7 @@ mod tests {
         );
         assert!(c.warnings.is_empty(), "{:?}", c.warnings);
         assert_eq!(c.prefix, Key::ctrl('a'));
+        assert!(c.prefix_chosen);
         assert_eq!(c.status, StatusPos::Top);
         assert!(!c.extended_keys);
         assert_eq!(c.theme.accent, Color::Rgb(0xff, 0x88, 0));

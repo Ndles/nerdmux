@@ -12,6 +12,7 @@ pub mod layout;
 pub mod overlay;
 pub mod pane;
 pub mod procinfo;
+pub mod prompt;
 pub mod proto;
 pub mod render;
 pub mod server;
