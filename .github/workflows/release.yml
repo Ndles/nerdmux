@@ -54,8 +54,10 @@ jobs:
         shell: bash
         run: |
           name="nerdmux-${GITHUB_REF_NAME}-${{ matrix.target }}"
-          mkdir "$name"
-          cp "target/${{ matrix.target }}/release/nerdmux" README.md LICENSE "$name/"
+          mkdir -p "$name/icons"
+          cp "target/${{ matrix.target }}/release/nerdmux" README.md LICENSE scripts/setup.sh "$name/"
+          # setup.sh finds the icons in icons/ next to it.
+          cp docs/logo/icon.svg docs/logo/icon-*.png "$name/icons/"
           tar czf "$name.tar.gz" "$name"
           shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v7

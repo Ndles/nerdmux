@@ -24,7 +24,12 @@ Needs Rust 1.85 or newer.
 
 ```sh
 cargo install --path .      # puts `nerdmux` in ~/.cargo/bin
+scripts/setup.sh            # optional: launcher, icon, terminal window and font for your desktop
 ```
+
+`setup.sh` works on Linux (GNOME, Hyprland, others) and macOS (new, not yet tested on a Mac), writes only under your
+home directory, asks before anything outside nerdmux, and keeps a copy of any file it replaces; `--dry-run` shows what
+it would do. Release archives include it.
 
 ## Getting started
 
@@ -97,8 +102,8 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
 
 - **Best setup.** nerdmux looks as intended in a fast terminal with true color and the kitty keyboard protocol, such
   as Alacritty (what Omarchy ships), kitty, Ghostty or WezTerm, with a [Nerd Font](https://www.nerdfonts.com) such as
-  JetBrainsMono Nerd Font for the icons nvim, lazygit and others draw. Open it in a window without a title bar (see
-  below) and let nerdmux keep the padding.
+  JetBrainsMono Nerd Font for the icons nvim, lazygit and others draw, in a window without a title bar.
+  `scripts/setup.sh` sets that up.
 - **Alt on macOS.** Terminal.app and iTerm2 keep `Alt` (Option) to themselves until "Use Option as Meta key" is turned
   on. Or pick a leader without it, such as `prefix = "ctrl+a"`.
 - **Alt+Space on GNOME.** `Alt+Space` is the intended leader: it sits under the thumb and no shell or editor uses it.
@@ -128,36 +133,13 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
   With several panes, the outline around the focused one sits in that space, so text stays put when you split.
   Where the terminal already pads (Omarchy's Alacritty), `padding = 0` and `padding_rows = 0` give the space back.
 - **No title bar.** A program inside a terminal cannot hide the terminal's title bar or scrollbar, so nerdmux leaves
-  your terminal's settings alone. GNOME Terminal draws its header in every mode but full screen (F11); for a plain
-  window without one, open nerdmux in a terminal that can drop its decorations: Alacritty
-  (`window.decorations = "None"`), kitty (`hide_window_decorations yes`) or Ghostty (`window-decoration = none`). For
-  Alacritty, a config of its own keeps your usual one and changes only the window, and a launcher puts it in the app grid:
-
-  ```sh
-  mkdir -p ~/.config/nerdmux
-  cat > ~/.config/nerdmux/alacritty.toml <<'EOF'
-  [general]
-  import = ["~/.config/alacritty/alacritty.toml"]
-
-  [window]
-  decorations = "None"
-  startup_mode = "Maximized"
-  EOF
-  cat > ~/.local/share/applications/nerdmux.desktop <<EOF
-  [Desktop Entry]
-  Type=Application
-  Name=nerdmux
-  Exec=alacritty --config-file $HOME/.config/nerdmux/alacritty.toml --class nerdmux -e $HOME/.cargo/bin/nerdmux
-  Icon=utilities-terminal
-  Categories=System;TerminalEmulator;
-  StartupWMClass=nerdmux
-  EOF
-  ```
-
-  Without a title bar, GNOME still moves the window with Super+drag, resizes it with Alt+F8 or Super+middle-drag, and
-  maximizes and restores it with Super+Up / Super+Down.
-  A terminal installed as a snap starts programs inside the snap's environment (its own GIO modules, graphics drivers
-  and cache); nerdmux leaves that behind, so the panes, and its check for GNOME's Alt+Space, see the system as it is.
+  your terminal's settings alone. GNOME Terminal draws its header in every mode but full screen (F11); Alacritty
+  (`window.decorations = "None"`), kitty (`hide_window_decorations yes`) and Ghostty (`window-decoration = none`) can
+  drop it, and `setup.sh` gives nerdmux a launcher that opens it that way, 200×80 cells large (`--size` picks another
+  size, `--maximized` fills the screen). GNOME still moves the window with Super+drag, resizes it with Alt+F8 or
+  Super+middle-drag, and maximizes and restores it with Super+Up / Super+Down. A terminal installed as a snap starts
+  programs inside the snap's environment (its own GIO modules, graphics drivers and cache); nerdmux leaves that behind,
+  so the panes, and its check for GNOME's Alt+Space, see the system as it is.
 - **Selecting text.** Hold `Shift` to use your terminal's own selection instead of nerdmux's.
 - **Nesting.** Starting nerdmux inside nerdmux is refused; use the session manager (`Alt+Space s`) to change session.
 
