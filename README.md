@@ -95,6 +95,10 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
 
 ## Things worth knowing
 
+- **Best setup.** nerdmux looks as intended in a fast terminal with true color and the kitty keyboard protocol, such
+  as Alacritty (what Omarchy ships), kitty, Ghostty or WezTerm, with a [Nerd Font](https://www.nerdfonts.com) such as
+  JetBrainsMono Nerd Font for the icons nvim, lazygit and others draw. Open it in a window without a title bar (see
+  below) and let nerdmux keep the padding.
 - **Alt on macOS.** Terminal.app and iTerm2 keep `Alt` (Option) to themselves until "Use Option as Meta key" is turned
   on. Or pick a leader without it, such as `prefix = "ctrl+a"`.
 - **Alt+Space on GNOME.** `Alt+Space` is the intended leader: it sits under the thumb and no shell or editor uses it.
@@ -121,9 +125,39 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
   integration does not load inside them.
 - **Padding.** nerdmux keeps one empty column on either side of the panes and one empty row on the edge away from the
   status bar, so text never touches the window edge in terminals without padding of their own, such as GNOME Terminal.
+  With several panes, the outline around the focused one sits in that space, so text stays put when you split.
   Where the terminal already pads (Omarchy's Alacritty), `padding = 0` and `padding_rows = 0` give the space back.
-  GNOME Terminal also shows a scrollbar by default; nerdmux keeps its own scrollback, so the bar has nothing to scroll
-  and can be turned off in the terminal's profile (Scrolling › Show scrollbar).
+- **No title bar.** A program inside a terminal cannot hide the terminal's title bar or scrollbar, so nerdmux leaves
+  your terminal's settings alone. GNOME Terminal draws its header in every mode but full screen (F11); for a plain
+  window without one, open nerdmux in a terminal that can drop its decorations: Alacritty
+  (`window.decorations = "None"`), kitty (`hide_window_decorations yes`) or Ghostty (`window-decoration = none`). For
+  Alacritty, a config of its own keeps your usual one and changes only the window, and a launcher puts it in the app grid:
+
+  ```sh
+  mkdir -p ~/.config/nerdmux
+  cat > ~/.config/nerdmux/alacritty.toml <<'EOF'
+  [general]
+  import = ["~/.config/alacritty/alacritty.toml"]
+
+  [window]
+  decorations = "None"
+  startup_mode = "Maximized"
+  EOF
+  cat > ~/.local/share/applications/nerdmux.desktop <<EOF
+  [Desktop Entry]
+  Type=Application
+  Name=nerdmux
+  Exec=alacritty --config-file $HOME/.config/nerdmux/alacritty.toml --class nerdmux -e $HOME/.cargo/bin/nerdmux
+  Icon=utilities-terminal
+  Categories=System;TerminalEmulator;
+  StartupWMClass=nerdmux
+  EOF
+  ```
+
+  Without a title bar, GNOME still moves the window with Super+drag, resizes it with Alt+F8 or Super+middle-drag, and
+  maximizes and restores it with Super+Up / Super+Down.
+  A terminal installed as a snap starts programs inside the snap's environment (its own GIO modules, graphics drivers
+  and cache); nerdmux leaves that behind, so the panes, and its check for GNOME's Alt+Space, see the system as it is.
 - **Selecting text.** Hold `Shift` to use your terminal's own selection instead of nerdmux's.
 - **Nesting.** Starting nerdmux inside nerdmux is refused; use the session manager (`Alt+Space s`) to change session.
 
