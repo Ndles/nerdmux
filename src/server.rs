@@ -1033,7 +1033,11 @@ impl Server {
         cwd: Option<PathBuf>,
     ) -> Result<WindowId, String> {
         let area = self.session_area(sid).ok_or("no such session")?;
-        let pid = self.spawn_pane(sid, area.width, area.height, command, cwd)?;
+        // Start the program at the size the layout will give it, padding taken
+        // off, as split does: a TUI that reads its size once would otherwise
+        // draw past the visible pane until something else resized it.
+        let size = pane_area(area, Pad::new(&self.config), 1);
+        let pid = self.spawn_pane(sid, size.width, size.height, command, cwd)?;
         let wid = self.id();
         let session = self.sessions.iter_mut().find(|s| s.id == sid).ok_or("no such session")?;
         session.windows.push(Window {
@@ -1052,7 +1056,7 @@ impl Server {
         } else {
             session.select(wid);
         }
-        self.dirty = true;
+        self.relayout(sid);
         Ok(wid)
     }
 

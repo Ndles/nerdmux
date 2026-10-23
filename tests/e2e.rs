@@ -638,6 +638,23 @@ fn closing_panes_and_ending_the_session() {
 }
 
 #[test]
+fn a_new_window_starts_at_its_padded_size() {
+    // The first window of a session is spawned before any layout pass. It must
+    // already exclude the padding: a program that reads its size once at start
+    // (a TUI) otherwise draws one row and two columns past what is visible,
+    // until something else happens to resize the pane.
+    let h = Harness::with_config("padding = 1\npadding_rows = 1");
+    let mut c = h.attach(80, 24);
+    c.run("stty size");
+    c.wait_text("22 78");
+    c.prefix('t');
+    c.wait_for("a second window", |s| s.last().unwrap().contains("2 sh"));
+    c.wait_gone("22 78");
+    c.run("stty size");
+    c.wait_text("22 78");
+}
+
+#[test]
 fn panes_follow_the_client_size() {
     let h = Harness::new();
     let mut c = h.attach(80, 24);
