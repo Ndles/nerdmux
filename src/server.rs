@@ -9,7 +9,7 @@ use crate::layout::{self, Axis, Geometry, Node, PaneId, Preset};
 use crate::overlay::{
     edit_text, Confirm, Overlay, Pending, PickItem, Picker, Prompt, PromptKind, SessionId, Target, WindowId,
 };
-use crate::pane::{Notice, Pane, SpawnOpts};
+use crate::pane::{Notice, Pane, PaneEvent, SpawnOpts};
 use crate::proto::{
     read_msg, write_msg, Key, KeyCode, Mouse, MouseButton, MouseKind, Request, ALT, C2S, CTRL, PROTOCOL_VERSION, S2C,
     SHIFT, SUPER,
@@ -54,6 +54,16 @@ pub enum Event {
     NewClient(UnixStream),
     ClientMsg(ClientId, C2S),
     ClientGone(ClientId),
+}
+
+impl From<PaneEvent> for Event {
+    fn from(e: PaneEvent) -> Event {
+        match e {
+            PaneEvent::Output(id, bytes) => Event::PtyOutput(id, bytes),
+            PaneEvent::Eof(id) => Event::PtyEof(id),
+            PaneEvent::Exit(id) => Event::ChildExit(id),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -133,9 +143,20 @@ pub struct Session {
     pub cwd: PathBuf,
     /// Higher means used more recently.
     pub used: u64,
+    /// The client that used it last attached with `--plain`: no status bar.
+    pub plain: bool,
 }
 
 impl Session {
+    /// Where the status bar goes: nowhere while a plain client drives it.
+    pub fn status(&self, config: &Config) -> StatusPos {
+        if self.plain {
+            StatusPos::Off
+        } else {
+            config.status
+        }
+    }
+
     pub fn active_index(&self) -> usize {
         self.windows.iter().position(|w| w.id == self.active).unwrap_or(0)
     }
@@ -229,6 +250,9 @@ pub struct Client {
     pub title: String,
     /// What the client's terminal can show.
     pub caps: Caps,
+    /// Attached with `--plain`: no status bar, no key bindings, every key
+    /// goes to the pane.
+    pub plain: bool,
 }
 
 pub struct Server {
@@ -717,7 +741,7 @@ impl Server {
                         let name = self.session_name(sid);
                         reply(format!("created session {name}"), 0);
                     }
-                    Ok(sid) => self.attach(id, link.clone(), cols, rows, sid, caps),
+                    Ok(sid) => self.attach(id, link.clone(), cols, rows, sid, caps, false),
                     Err(e) => reply(format!("nerdmux: {e}"), 1),
                 }
             }
@@ -733,11 +757,11 @@ impl Server {
                     None => self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id),
                 };
                 match found {
-                    Some(sid) => self.attach(id, link.clone(), cols, rows, sid, caps),
+                    Some(sid) => self.attach(id, link.clone(), cols, rows, sid, caps, false),
                     None if create => match self.create_session(None, Vec::new(), cwd, env, cols, rows) {
                         Ok(sid) => {
                             self.note_placeholder(sid);
-                            self.attach(id, link.clone(), cols, rows, sid, caps);
+                            self.attach(id, link.clone(), cols, rows, sid, caps, false);
                         }
                         Err(e) => return reply(format!("nerdmux: {e}"), 1),
                     },
@@ -746,6 +770,18 @@ impl Server {
                 // After a crash or reboot, the first client is offered the
                 // saved sessions.
                 self.offer_restore(id, false);
+            }
+            Request::AttachPlain { target } => {
+                // By exact name: a prefix could pick one of the user's own
+                // sessions.
+                let sid = match self.sessions.iter().find(|s| s.name == target).map(|s| s.id) {
+                    Some(sid) => sid,
+                    None => match self.create_session(Some(target), Vec::new(), cwd, env, cols, rows) {
+                        Ok(sid) => sid,
+                        Err(e) => return reply(format!("nerdmux: {e}"), 1),
+                    },
+                };
+                self.attach(id, link.clone(), cols, rows, sid, caps, true);
             }
             Request::Restore => {
                 let found = self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id);
@@ -759,7 +795,7 @@ impl Server {
                         Err(e) => return reply(format!("nerdmux: {e}"), 1),
                     },
                 };
-                self.attach(id, link.clone(), cols, rows, sid, caps);
+                self.attach(id, link.clone(), cols, rows, sid, caps, false);
                 self.offer_restore(id, true);
             }
             Request::Action { target, pane, action } => {
@@ -802,7 +838,8 @@ impl Server {
         }
     }
 
-    fn attach(&mut self, id: ClientId, link: Link, cols: u16, rows: u16, sid: SessionId, caps: Caps) {
+    #[allow(clippy::too_many_arguments)]
+    fn attach(&mut self, id: ClientId, link: Link, cols: u16, rows: u16, sid: SessionId, caps: Caps, plain: bool) {
         let (cols, rows) = (cols.max(1), rows.max(1));
         let mut client = Client {
             id,
@@ -828,12 +865,13 @@ impl Server {
             pending: Vec::new(),
             title: String::new(),
             caps,
+            plain,
         };
         if self.config.mouse {
             client.pending.extend_from_slice(MOUSE_ON);
         }
         client.pending.extend_from_slice(&self.terminal_colors());
-        if let Some(w) = self.config.warnings.first() {
+        if let Some(w) = self.config.warnings.first().filter(|_| !plain) {
             client.message = Some((w.clone(), Instant::now() + MESSAGE_TIME * 2));
         }
         self.clients.insert(id, client);
@@ -956,6 +994,7 @@ impl Server {
             env,
             cwd: PathBuf::from(cwd),
             used,
+            plain: false,
         });
         let command = (!command.is_empty()).then_some(command);
         match self.new_window(sid, command, None) {
@@ -972,7 +1011,7 @@ impl Server {
 
     fn session_area(&self, sid: SessionId) -> Option<Rect> {
         let s = self.sessions.iter().find(|s| s.id == sid)?;
-        Some(window_area(self.config.status, s.cols, s.rows))
+        Some(window_area(s.status(&self.config), s.cols, s.rows))
     }
 
     fn spawn_pane(
@@ -1018,7 +1057,7 @@ impl Server {
             env: &env,
             term: &self.config.term,
             scrollback: self.config.scrollback,
-            socket: &self.socket,
+            socket: Some(&self.socket),
         };
         let mut pane = Pane::spawn(id, opts, self.tx.clone()).map_err(|e| format!("cannot start {program}: {e}"))?;
         pane.last_focus = focus;
@@ -1085,13 +1124,14 @@ impl Server {
     /// A session is as large as the client that used it last.
     fn adopt_client_size(&mut self, cid: ClientId) {
         let Some(c) = self.clients.get(&cid) else { return };
-        let (sid, cols, rows) = (c.session, c.cols, c.rows);
+        let (sid, cols, rows, plain) = (c.session, c.cols, c.rows, c.plain);
         let used = self.bump();
         let Some(s) = self.sessions.iter_mut().find(|s| s.id == sid) else { return };
         s.used = used;
-        if s.cols != cols || s.rows != rows {
+        if s.cols != cols || s.rows != rows || s.plain != plain {
             s.cols = cols;
             s.rows = rows;
+            s.plain = plain;
             self.relayout(sid);
         }
     }
@@ -1368,6 +1408,17 @@ impl Server {
         let Some(client) = self.clients.get_mut(&cid) else { return };
         let sid = client.session;
         self.dirty = true;
+
+        if client.plain {
+            // The program around this client owns the keys; nerdmux only
+            // keeps the session alive.
+            for pid in self.input_targets(sid) {
+                if let Some(p) = self.panes.get_mut(&pid).filter(|p| !p.in_copy_mode()) {
+                    p.send_key(key);
+                }
+            }
+            return;
+        }
 
         if client.overlay.is_some() {
             self.overlay_key(cid, key);
@@ -1868,9 +1919,9 @@ impl Server {
         if !matches!(m.kind, MouseKind::Moved) {
             self.adopt_client_size(cid);
         }
-        let status = self.config.status;
         let Some(client) = self.clients.get_mut(&cid) else { return };
         let sid = client.session;
+        let status = self.sessions.iter().find(|s| s.id == sid).map_or(self.config.status, |s| s.status(&self.config));
 
         // Popups swallow the mouse; the wheel moves through pickers and help.
         if let Some(overlay) = client.overlay.as_mut() {

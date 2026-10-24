@@ -101,7 +101,9 @@ fn connect(socket: &Path, start: bool) -> anyhow::Result<Option<UnixStream>> {
     bail!("the nerdmux server did not start; see {}", socket.with_extension("log").display())
 }
 
-fn convert_key(k: event::KeyEvent) -> Option<Key> {
+/// A crossterm key as nerdmux's own; `None` for releases and keys a
+/// terminal program cannot be sent.
+pub fn convert_key(k: event::KeyEvent) -> Option<Key> {
     use event::KeyCode as K;
     if k.kind == KeyEventKind::Release {
         return None;
@@ -146,7 +148,7 @@ fn convert_key(k: event::KeyEvent) -> Option<Key> {
     Some(Key::new(code, mods))
 }
 
-fn convert_mouse(m: event::MouseEvent) -> Option<Mouse> {
+pub fn convert_mouse(m: event::MouseEvent) -> Option<Mouse> {
     let button = |b: event::MouseButton| match b {
         event::MouseButton::Left => MouseButton::Left,
         event::MouseButton::Middle => MouseButton::Middle,
@@ -240,6 +242,10 @@ fn interactive(mut stream: UnixStream, request: Request) -> anyhow::Result<i32> 
         bail!("nerdmux needs a terminal to attach to (stdin and stdout must be a tty)");
     }
     let (cols, rows) = crossterm::terminal::size().context("cannot read the terminal size")?;
+    // A plain client's keys come from the program around it, which speaks
+    // plain terminal input; asking about extended keys would only cost a
+    // timeout.
+    let plain = matches!(request, Request::AttachPlain { .. });
     write_msg(&mut stream, &hello(request, cols, rows))?;
 
     // Wait for the first answer before touching the terminal, so errors
@@ -280,7 +286,8 @@ fn interactive(mut stream: UnixStream, request: Request) -> anyhow::Result<i32> 
     }
     let mut out = std::io::stdout();
     // Ask before drawing anything: the answer arrives on the input stream.
-    let extended = crate::config::Config::load().extended_keys
+    let extended = !plain
+        && crate::config::Config::load().extended_keys
         && crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     out.write_all(ENTER)?;
     if extended {
@@ -327,12 +334,17 @@ fn interactive(mut stream: UnixStream, request: Request) -> anyhow::Result<i32> 
 
 pub fn run(socket: &Path, request: Request) -> anyhow::Result<i32> {
     let attaches = match &request {
-        Request::Attach { .. } | Request::Restore => true,
+        Request::Attach { .. } | Request::AttachPlain { .. } | Request::Restore => true,
         Request::New { detached, .. } => !detached,
         _ => false,
     };
-    let may_start = matches!(&request, Request::New { .. } | Request::Attach { create: true, .. } | Request::Restore);
-    if attaches && std::env::var_os("NERDMUX").is_some_and(|v| !v.is_empty()) {
+    let may_start = matches!(
+        &request,
+        Request::New { .. } | Request::Attach { create: true, .. } | Request::AttachPlain { .. } | Request::Restore
+    );
+    // A plain client is made to run inside another program, so it may.
+    let nests = !matches!(request, Request::AttachPlain { .. });
+    if attaches && nests && std::env::var_os("NERDMUX").is_some_and(|v| !v.is_empty()) {
         bail!("already inside nerdmux; use the session manager (Alt+Space s) to change session, or unset $NERDMUX to nest anyway");
     }
     let mut attempt = 0;

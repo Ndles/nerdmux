@@ -391,6 +391,7 @@ impl Server {
             env: env.to_vec(),
             cwd: cwd.to_path_buf(),
             used,
+            plain: false,
         });
         let area = self.session_area(sid)?;
         for w in &saved.windows {

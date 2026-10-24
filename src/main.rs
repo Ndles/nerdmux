@@ -13,6 +13,9 @@ USAGE
   nerdmux new [-s NAME] [-d] [-- COMMAND...]
                                 start a session (-d: do not attach)
   nerdmux attach [-t NAME]         attach to a session        (alias: a)
+  nerdmux attach --plain -t NAME   attach without a status bar or key
+                                bindings, every key to the pane; makes
+                                the session if needed (for nerdfleet)
   nerdmux ls                       list sessions
   nerdmux kill-session -t NAME     end a session and everything in it
   nerdmux kill-server              end every session
@@ -166,6 +169,13 @@ fn main() {
                 }
             }
             Request::New { name, command: cmd, detached }
+        }
+        "attach" | "attach-session" | "a" if rest.iter().any(|a| a == "--plain") => {
+            let rest: Vec<String> = rest.iter().filter(|a| *a != "--plain").cloned().collect();
+            match named(&["-t"], &rest) {
+                Some(target) => Request::AttachPlain { target },
+                None => fail("attach --plain needs a session name: -t NAME"),
+            }
         }
         "attach" | "attach-session" | "a" => Request::Attach { target: named(&["-t"], &rest), create: false },
         "ls" | "list" | "list-sessions" => Request::List,

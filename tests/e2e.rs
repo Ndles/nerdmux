@@ -1633,3 +1633,38 @@ fn settings_panel_edits_the_config_file() {
     // The user's own lines are untouched.
     assert!(file().starts_with("# my own comment\n"), "{}", file());
 }
+
+#[test]
+fn plain_attach_passes_every_key_and_hides_the_status_bar() {
+    let h = Harness::new();
+    let mut c = h.connect(80, 10, Request::AttachPlain { target: "fleet".into() });
+    c.wait_for("the shell prompt", |s| s.iter().any(|l| l.starts_with('$')));
+    // The pane has the whole screen: no row goes to a status bar.
+    c.run("stty size");
+    c.wait_text("10 80");
+    assert!(!c.status().contains("fleet"), "no status bar: {:?}", c.status());
+
+    // The leader and the chords reach the shell instead of nerdmux: the
+    // leader then `d` would otherwise detach.
+    c.key(Key::alt(' '));
+    c.typed("d");
+    c.key(Key::ctrl('u'));
+    c.run("echo still-$((20+1))");
+    c.wait_text("still-21");
+    assert!(c.exit.is_none(), "the plain client detached: {:?}", c.exit);
+
+    // Dropping the connection leaves the session, as with any client; a
+    // normal client attached to it gets the status bar back.
+    drop(c);
+    let mut c = h.connect(80, 10, Request::Attach { target: Some("fleet".into()), create: false });
+    c.wait_text("still-21");
+    c.wait_for("the status bar", |s| s.last().is_some_and(|l| l.contains("fleet")));
+    c.run("stty size");
+    c.wait_text("9 80");
+
+    // Attaching plainly again finds the same session rather than a new one.
+    drop(c);
+    let mut c = h.connect(80, 10, Request::AttachPlain { target: "fleet".into() });
+    c.wait_text("still-21");
+    assert_eq!(h.stdout(&["ls"]).lines().filter(|l| l.starts_with("fleet:")).count(), 1);
+}

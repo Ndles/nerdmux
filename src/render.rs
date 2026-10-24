@@ -314,7 +314,9 @@ fn map_color(c: TermColor, foreground: bool, theme: &Theme) -> (Color, bool) {
     }
 }
 
-fn draw_pane(
+/// Draws `pane` into `rect` of `buf`. `links` holds one entry per cell of
+/// `buf` and receives the hyperlink of each cell drawn.
+pub fn draw_pane(
     buf: &mut Buffer,
     links: &mut [Option<Hyperlink>],
     rect: Rect,
@@ -1324,7 +1326,8 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
         // terminal underneath is set to.
         fill(&mut buf, Rect::new(0, 0, cols, rows), Style::default().fg(theme.fg).bg(theme.bg));
     }
-    let area = window_area(config.status, session.cols, session.rows);
+    let status = session.status(config);
+    let area = window_area(status, session.cols, session.rows);
     let window = session.window();
     let geom = window.geometry(area, crate::server::Pad::new(config));
 
@@ -1358,7 +1361,7 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
     }
 
     client.tabs.clear();
-    let status_row = match config.status {
+    let status_row = match status {
         StatusPos::Top => Some(0),
         StatusPos::Bottom => Some(rows.saturating_sub(1)),
         StatusPos::Off => None,
@@ -1379,7 +1382,7 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
     }
 
     // The part of the screen popups may use: everything but the status bar.
-    let bounds = match config.status {
+    let bounds = match status {
         StatusPos::Top => Rect::new(0, 1, cols, rows.saturating_sub(1)),
         StatusPos::Bottom => Rect::new(0, 0, cols, rows.saturating_sub(1)),
         StatusPos::Off => Rect::new(0, 0, cols, rows),

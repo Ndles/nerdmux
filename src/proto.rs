@@ -138,6 +138,12 @@ pub enum Request {
     /// Attach (starting a session if there is none) and offer the saved
     /// sessions back.
     Restore,
+    /// Attach to session `target`, making it if there is none, without a
+    /// status bar or key bindings: every key goes to the pane. For keeping
+    /// a session alive inside another program that owns the keys.
+    AttachPlain {
+        target: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -467,6 +473,10 @@ impl Wire for Request {
                 action.put(out);
             }
             Request::Restore => out.push(6),
+            Request::AttachPlain { target } => {
+                out.push(7);
+                target.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -478,6 +488,7 @@ impl Wire for Request {
             4 => Request::KillServer,
             5 => Request::Action { target: Wire::get(input)?, pane: Wire::get(input)?, action: Wire::get(input)? },
             6 => Request::Restore,
+            7 => Request::AttachPlain { target: Wire::get(input)? },
             _ => return Err(bad("unknown request")),
         })
     }
@@ -588,6 +599,7 @@ mod tests {
             Request::KillServer,
             Request::Action { target: Some("w".into()), pane: Some(7), action: "split-right".into() },
             Request::Restore,
+            Request::AttachPlain { target: "fleet".into() },
         ] {
             let msg = C2S::Hello { version: 1, cols: 1, rows: 1, cwd: String::new(), env: Vec::new(), request };
             assert_eq!(format!("{:?}", round_trip(msg.clone())), format!("{msg:?}"));

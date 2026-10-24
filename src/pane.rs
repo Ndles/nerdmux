@@ -5,7 +5,6 @@ use crate::input;
 use crate::layout::PaneId;
 use crate::procinfo;
 use crate::proto::{Key, Mouse};
-use crate::server::Event;
 use crate::status;
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -65,6 +64,16 @@ impl Dimensions for TermSize {
     }
 }
 
+/// What a pane's threads report: output to feed, and the end of the
+/// program. Whoever owns the pane turns these into events of its own
+/// through `From`.
+#[derive(Debug)]
+pub enum PaneEvent {
+    Output(PaneId, Vec<u8>),
+    Eof(PaneId),
+    Exit(PaneId),
+}
+
 /// Things the server has to react to after a pane processed output.
 #[derive(Debug, PartialEq)]
 pub enum Notice {
@@ -94,7 +103,9 @@ pub struct SpawnOpts<'a> {
     pub env: &'a [(String, String)],
     pub term: &'a str,
     pub scrollback: usize,
-    pub socket: &'a str,
+    /// The nerdmux server's socket, so programs in the pane can find it;
+    /// `None` for a pane that does not live in a nerdmux server.
+    pub socket: Option<&'a str>,
 }
 
 pub struct Pane {
@@ -137,7 +148,11 @@ pub struct Pane {
 const UNSET_CURSOR: CursorShape = CursorShape::HollowBlock;
 
 impl Pane {
-    pub fn spawn(id: PaneId, opts: SpawnOpts, tx: SyncSender<Event>) -> anyhow::Result<Pane> {
+    pub fn spawn<E: From<PaneEvent> + Send + 'static>(
+        id: PaneId,
+        opts: SpawnOpts,
+        tx: SyncSender<E>,
+    ) -> anyhow::Result<Pane> {
         let cols = opts.cols.max(2);
         let rows = opts.rows.max(1);
         let pair = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
@@ -159,8 +174,10 @@ impl Pane {
         cmd.env("TERM", opts.term);
         cmd.env("TERM_PROGRAM", "nerdmux");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        cmd.env("NERDMUX", opts.socket);
-        cmd.env("NERDMUX_PANE", id.to_string());
+        if let Some(socket) = opts.socket {
+            cmd.env("NERDMUX", socket);
+            cmd.env("NERDMUX_PANE", id.to_string());
+        }
         if let Some(cwd) = opts.cwd.filter(|p| p.is_dir()) {
             cmd.cwd(cwd);
         }
@@ -179,7 +196,7 @@ impl Pane {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if reader_tx.send(Event::PtyOutput(id, buf[..n].to_vec())).is_err() {
+                        if reader_tx.send(PaneEvent::Output(id, buf[..n].to_vec()).into()).is_err() {
                             return;
                         }
                     }
@@ -187,7 +204,7 @@ impl Pane {
                     Err(_) => break,
                 }
             }
-            let _ = reader_tx.send(Event::PtyEof(id));
+            let _ = reader_tx.send(PaneEvent::Eof(id).into());
         })?;
 
         let reaped = Arc::new(AtomicBool::new(false));
@@ -195,7 +212,7 @@ impl Pane {
         thread::Builder::new().name(format!("pane-{id}-wait")).spawn(move || {
             let _ = child.wait();
             reaped_flag.store(true, Ordering::SeqCst);
-            let _ = tx.send(Event::ChildExit(id));
+            let _ = tx.send(PaneEvent::Exit(id).into());
         })?;
 
         // Writes go through a thread so a program that stops reading its
