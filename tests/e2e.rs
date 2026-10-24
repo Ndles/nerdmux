@@ -1668,3 +1668,32 @@ fn plain_attach_passes_every_key_and_hides_the_status_bar() {
     c.wait_text("still-21");
     assert_eq!(h.stdout(&["ls"]).lines().filter(|l| l.starts_with("fleet:")).count(), 1);
 }
+
+#[test]
+fn plain_sessions_get_a_server_of_their_own() {
+    let h = Harness::new();
+    // Without -S or NERDMUX_SOCKET, the CLI puts plain sessions on
+    // plain.sock beside the default socket.
+    let bin = std::env::var("NERDMUX_TEST_BIN").unwrap_or_else(|_| BIN.to_string());
+    let runtime = h.dir.join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let env: Vec<(String, String)> = h
+        .env()
+        .into_iter()
+        .filter(|(k, _)| k != "NERDMUX_SOCKET")
+        .chain([("XDG_RUNTIME_DIR".into(), runtime.to_string_lossy().into_owned())])
+        .collect();
+    // No terminal here, so the client stops before attaching, but only
+    // after the server is up.
+    let out =
+        Command::new(&bin).args(["attach", "--plain", "-t", "fleet"]).env_clear().envs(env.clone()).output().unwrap();
+    assert!(!out.status.success());
+    assert!(runtime.join("nerdmux/plain.sock").exists(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(!runtime.join("nerdmux/default.sock").exists());
+    let _ = Command::new(&bin)
+        .args(["-S", runtime.join("nerdmux/plain.sock").to_str().unwrap(), "kill-server"])
+        .env_clear()
+        .envs(env)
+        .output();
+}

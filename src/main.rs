@@ -15,7 +15,8 @@ USAGE
   nerdmux attach [-t NAME]         attach to a session        (alias: a)
   nerdmux attach --plain -t NAME   attach without a status bar or key
                                 bindings, every key to the pane; makes
-                                the session if needed (for nerdfleet)
+                                the session if needed, on a server of
+                                its own unless -S is given (for nerdfleet)
   nerdmux ls                       list sessions
   nerdmux kill-session -t NAME     end a session and everything in it
   nerdmux kill-server              end every session
@@ -90,6 +91,7 @@ fn main() {
     }
 
     let mut socket = server::default_socket();
+    let mut socket_given = std::env::var_os("NERDMUX_SOCKET").is_some_and(|s| !s.is_empty());
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -98,6 +100,7 @@ fn main() {
                     fail("--socket needs a path");
                 }
                 socket = PathBuf::from(args.remove(i + 1));
+                socket_given = true;
                 args.remove(i);
             }
             "--" => break,
@@ -209,6 +212,13 @@ fn main() {
         }
         other => fail(&format!("unknown command {other:?}")),
     };
+
+    // Plain sessions belong to the program they run inside, so they live on
+    // a server of their own: not in your session list, your kill-server or
+    // your restore, and not tied to the version of your running server.
+    if matches!(request, Request::AttachPlain { .. }) && !socket_given {
+        socket = server::runtime_dir().join("plain.sock");
+    }
 
     match client::run(&socket, request) {
         Ok(code) => std::process::exit(code),

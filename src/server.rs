@@ -1412,8 +1412,10 @@ impl Server {
         if client.plain {
             // The program around this client owns the keys; nerdmux only
             // keeps the session alive.
+            // Copy mode, if a normal client left it on, has no keys here.
             for pid in self.input_targets(sid) {
-                if let Some(p) = self.panes.get_mut(&pid).filter(|p| !p.in_copy_mode()) {
+                if let Some(p) = self.panes.get_mut(&pid) {
+                    p.exit_copy();
                     p.send_key(key);
                 }
             }
