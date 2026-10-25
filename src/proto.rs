@@ -144,6 +144,16 @@ pub enum Request {
     AttachPlain {
         target: String,
     },
+    /// Open a window in session `target` (or the one `pane` is in, or the
+    /// most recently used) running `command`, or a shell when it is empty.
+    /// With `reuse`, switch to the window called `name` if there is one.
+    NewWindow {
+        target: Option<String>,
+        pane: Option<u32>,
+        name: Option<String>,
+        reuse: bool,
+        command: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -477,6 +487,14 @@ impl Wire for Request {
                 out.push(7);
                 target.put(out);
             }
+            Request::NewWindow { target, pane, name, reuse, command } => {
+                out.push(8);
+                target.put(out);
+                pane.put(out);
+                name.put(out);
+                reuse.put(out);
+                command.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -489,6 +507,13 @@ impl Wire for Request {
             5 => Request::Action { target: Wire::get(input)?, pane: Wire::get(input)?, action: Wire::get(input)? },
             6 => Request::Restore,
             7 => Request::AttachPlain { target: Wire::get(input)? },
+            8 => Request::NewWindow {
+                target: Wire::get(input)?,
+                pane: Wire::get(input)?,
+                name: Wire::get(input)?,
+                reuse: Wire::get(input)?,
+                command: Wire::get(input)?,
+            },
             _ => return Err(bad("unknown request")),
         })
     }
@@ -600,6 +625,13 @@ mod tests {
             Request::Action { target: Some("w".into()), pane: Some(7), action: "split-right".into() },
             Request::Restore,
             Request::AttachPlain { target: "fleet".into() },
+            Request::NewWindow {
+                target: None,
+                pane: Some(3),
+                name: Some("fleet".into()),
+                reuse: true,
+                command: vec!["nerdfleet".into()],
+            },
         ] {
             let msg = C2S::Hello { version: 1, cols: 1, rows: 1, cwd: String::new(), env: Vec::new(), request };
             assert_eq!(format!("{:?}", round_trip(msg.clone())), format!("{msg:?}"));

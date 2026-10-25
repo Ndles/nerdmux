@@ -818,6 +818,40 @@ impl Server {
                 self.run_action(cid, sid, action);
                 reply(String::new(), 0);
             }
+            Request::NewWindow { target, pane, name, reuse, command } => {
+                let by_pane = pane.and_then(|p| {
+                    self.sessions.iter().find(|s| s.windows.iter().any(|w| w.layout.contains(p))).map(|s| s.id)
+                });
+                let sid = match &target {
+                    Some(t) => self.find_session(t),
+                    None => by_pane.or_else(|| self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id)),
+                };
+                let Some(sid) = sid else {
+                    reply("nerdmux: no such session".into(), 1);
+                    return;
+                };
+                let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                let session = self.sessions.iter_mut().find(|s| s.id == sid).expect("found above");
+                let existing = name.as_ref().filter(|_| reuse).and_then(|n| {
+                    session.windows.iter().find(|w| w.name.as_ref() == Some(n)).map(|w| w.id)
+                });
+                if let Some(wid) = existing {
+                    session.select(wid);
+                    self.dirty = true;
+                    reply(String::new(), 0);
+                    return;
+                }
+                let command = (!command.is_empty()).then_some(command);
+                match self.new_window(sid, command, Some(PathBuf::from(cwd))) {
+                    Ok(wid) => {
+                        if let Some(w) = self.sessions.iter_mut().flat_map(|s| s.windows.iter_mut()).find(|w| w.id == wid) {
+                            w.name = name;
+                        }
+                        reply(String::new(), 0);
+                    }
+                    Err(e) => reply(format!("nerdmux: {e}"), 1),
+                }
+            }
         }
         if let Some(taken) = gnome {
             self.gnome_took_leader = taken;

@@ -60,6 +60,7 @@ nerdmux ls                     # list sessions
 nerdmux attach -t work         # attach by name (a unique prefix is enough)
 nerdmux kill-server            # end everything
 nerdmux action split-right     # run any action from a script or a pane
+nerdmux new-window -n top --reuse -- btop  # open a window running btop, or go back to it
 nerdmux attach --plain -t fleet  # no status bar or keys of its own, on a separate server: for use inside another program
 ```
 

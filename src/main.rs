@@ -24,6 +24,10 @@ USAGE
                                 or reboot
   nerdmux action [-t NAME] ACTION  run an action in a session, e.g.
                                 nerdmux action split-right
+  nerdmux new-window [-t NAME] [-n WINDOW] [--reuse] [-- COMMAND...]
+                                open a window in a session (the current
+                                one inside nerdmux); --reuse switches to
+                                the window called WINDOW if there is one
   nerdmux keys                     print the key bindings
   nerdmux config                   print an example config file
   nerdmux config --path            print where the config file lives
@@ -209,6 +213,27 @@ fn main() {
             }
             let pane = std::env::var("NERDMUX_PANE").ok().and_then(|p| p.parse().ok());
             Request::Action { target, pane, action: words.join(" ") }
+        }
+        "new-window" | "neww" => {
+            let (mut target, mut name, mut reuse, mut command) = (None, None, false, Vec::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-t" => target = Some(it.next().cloned().unwrap_or_else(|| fail("-t needs a name"))),
+                    "-n" | "--name" => name = Some(it.next().cloned().unwrap_or_else(|| fail("-n needs a name"))),
+                    "--reuse" => reuse = true,
+                    "--" => {
+                        command = it.cloned().collect();
+                        break;
+                    }
+                    other => fail(&format!("unexpected argument {other}; put commands after --")),
+                }
+            }
+            if reuse && name.is_none() {
+                fail("--reuse needs a window name: -n WINDOW");
+            }
+            let pane = std::env::var("NERDMUX_PANE").ok().and_then(|p| p.parse().ok());
+            Request::NewWindow { target, pane, name, reuse, command }
         }
         other => fail(&format!("unknown command {other:?}")),
     };
