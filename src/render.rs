@@ -244,6 +244,8 @@ fn gradient(stops: &[Color], t: f32) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
+// The matrices are Björn Ottosson's OKLab constants, kept as published.
+#[allow(clippy::excessive_precision)]
 fn oklab([r, g, b]: [u8; 3]) -> [f32; 3] {
     let lin = |c: u8| {
         let c = c as f32 / 255.0;
@@ -264,6 +266,7 @@ fn oklab([r, g, b]: [u8; 3]) -> [f32; 3] {
     ]
 }
 
+#[allow(clippy::excessive_precision)]
 fn from_oklab([l, a, b]: [f32; 3]) -> [u8; 3] {
     let l_ = (l + 0.3963377774 * a + 0.2158037573 * b).powi(3);
     let m_ = (l - 0.1055613458 * a - 0.0638541728 * b).powi(3);

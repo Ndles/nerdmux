@@ -48,7 +48,11 @@ pub struct Terminal {
 impl Terminal {
     /// Starts `opts.command`. Its output and its end arrive on `events`,
     /// tagged with `id`, as `TerminalEvent`s for the caller to pass to `feed`.
-    pub fn spawn<E: From<TerminalEvent> + Send + 'static>(id: u32, opts: Options, events: SyncSender<E>) -> anyhow::Result<Terminal> {
+    pub fn spawn<E: From<TerminalEvent> + Send + 'static>(
+        id: u32,
+        opts: Options,
+        events: SyncSender<E>,
+    ) -> anyhow::Result<Terminal> {
         let opts = SpawnOpts {
             cols: opts.cols,
             rows: opts.rows,
@@ -110,7 +114,13 @@ impl Terminal {
 
     /// Draws the screen into `area`; `active` false fades it, for a program
     /// that has ended or a terminal without the focus.
-    pub fn draw(&mut self, buf: &mut ratatui::buffer::Buffer, area: ratatui::layout::Rect, theme: &Theme, active: bool) {
+    pub fn draw(
+        &mut self,
+        buf: &mut ratatui::buffer::Buffer,
+        area: ratatui::layout::Rect,
+        theme: &Theme,
+        active: bool,
+    ) {
         crate::render::draw_pane(buf, &mut [], area, &mut self.pane, theme, active, !active);
     }
 }

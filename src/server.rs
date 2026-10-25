@@ -832,9 +832,10 @@ impl Server {
                 };
                 let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
                 let session = self.sessions.iter_mut().find(|s| s.id == sid).expect("found above");
-                let existing = name.as_ref().filter(|_| reuse).and_then(|n| {
-                    session.windows.iter().find(|w| w.name.as_ref() == Some(n)).map(|w| w.id)
-                });
+                let existing = name
+                    .as_ref()
+                    .filter(|_| reuse)
+                    .and_then(|n| session.windows.iter().find(|w| w.name.as_ref() == Some(n)).map(|w| w.id));
                 if let Some(wid) = existing {
                     session.select(wid);
                     self.dirty = true;
@@ -844,7 +845,9 @@ impl Server {
                 let command = (!command.is_empty()).then_some(command);
                 match self.new_window(sid, command, Some(PathBuf::from(cwd))) {
                     Ok(wid) => {
-                        if let Some(w) = self.sessions.iter_mut().flat_map(|s| s.windows.iter_mut()).find(|w| w.id == wid) {
+                        if let Some(w) =
+                            self.sessions.iter_mut().flat_map(|s| s.windows.iter_mut()).find(|w| w.id == wid)
+                        {
                             w.name = name;
                         }
                         reply(String::new(), 0);
