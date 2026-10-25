@@ -17,7 +17,7 @@ pub enum Overlay {
     PaneNumbers,
     /// Arrows resize and move the focused pane until Enter.
     Arrange,
-    Settings(crate::settings::Panel),
+    Settings(Box<crate::settings::Panel>),
     Restore(RestorePicker),
 }
 

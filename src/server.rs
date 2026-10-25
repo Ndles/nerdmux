@@ -277,6 +277,9 @@ pub struct Server {
     started: Instant,
     had_session: bool,
     last_poll: Instant,
+    /// When the shared theme file last changed, to follow edits made
+    /// elsewhere (by hand, or by another tool).
+    theme_changed: Option<std::time::SystemTime>,
     /// The snapshot of the sessions kept on disk, and restoring from it.
     snap: restore::SnapState,
 }
@@ -292,6 +295,26 @@ pub fn window_area(status: StatusPos, cols: u16, rows: u16) -> Rect {
 }
 
 /// A path with the home directory written as `~`.
+/// When the shared theme file last changed; `None` while there is none.
+fn theme_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(crate::config::shared_theme_path()).and_then(|m| m.modified()).ok()
+}
+
+/// What the panel says after writing `key`: where it went, for a theme
+/// color, and that nerdmux keeps a color of its own over a shared one.
+fn saved_text(panel: &settings::Panel, key: &str, done: &str) -> String {
+    if !key.starts_with("theme.") {
+        return format!("{key} {done}");
+    }
+    match panel.scope {
+        settings::Scope::Own => format!("{key} {done} for nerdmux only"),
+        settings::Scope::Shared if panel.custom_keys.iter().any(|k| k == key) => {
+            format!("{key} {done} for all Nërd tools; nerdmux keeps its own (Tab, then Del, drops it)")
+        }
+        settings::Scope::Shared => format!("{key} {done} for all Nërd tools"),
+    }
+}
+
 pub fn tidy_path(path: &std::path::Path) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     let s = path.to_string_lossy().into_owned();
@@ -399,6 +422,7 @@ impl Server {
             started: now,
             had_session: false,
             last_poll: now,
+            theme_changed: theme_mtime(),
             snap: restore::SnapState::new(terminating),
         };
         server.snapshot_start();
@@ -553,6 +577,22 @@ impl Server {
         }
         if now.duration_since(self.last_poll) >= Duration::from_millis(500) {
             self.last_poll = now;
+            let changed = theme_mtime();
+            if changed != self.theme_changed {
+                self.theme_changed = changed;
+                for c in self.clients.values_mut() {
+                    if let Some(Overlay::Settings(panel)) = c.overlay.as_mut() {
+                        panel.reread();
+                    }
+                }
+                if let Some(problem) = self.reload_config() {
+                    let ids: Vec<ClientId> = self.clients.keys().copied().collect();
+                    for cid in ids {
+                        self.message(Some(cid), problem.clone());
+                    }
+                }
+                self.dirty = true;
+            }
             for s in &self.sessions {
                 for w in &s.windows {
                     if let Some(p) = self.panes.get_mut(&w.active) {
@@ -2495,7 +2535,7 @@ impl Server {
                 let text = self.reload_config().unwrap_or_else(|| "config reloaded".to_string());
                 self.message(cid, text);
             }
-            Action::Settings => set_overlay(self, Overlay::Settings(settings::Panel::open())),
+            Action::Settings => set_overlay(self, Overlay::Settings(Box::new(settings::Panel::open()))),
         }
     }
 
@@ -2559,7 +2599,7 @@ impl Server {
                         }
                         let spec = settings::key_spec(key);
                         saved = Some((
-                            settings::write("prefix", Some(toml_edit::value(spec))),
+                            settings::write("prefix", Some(toml_edit::value(spec)), panel.scope),
                             format!("leader is now {}", keys::key_label(key)),
                         ));
                     }
@@ -2599,7 +2639,10 @@ impl Server {
                         match value {
                             Ok(v) => {
                                 panel.mode = Mode::Browse;
-                                saved = Some((settings::write(set.key, v), format!("{} saved", set.key)));
+                                saved = Some((
+                                    settings::write(set.key, v, panel.scope),
+                                    saved_text(panel, set.key, "saved"),
+                                ));
                             }
                             Err(e) => self.message(Some(cid), e),
                         }
@@ -2623,8 +2666,17 @@ impl Server {
                 PageDown => panel.move_by(10, rows.len()),
                 Home => panel.selected = 0,
                 End => panel.selected = rows.len().saturating_sub(1),
+                Tab if plain => {
+                    panel.scope = match panel.scope {
+                        settings::Scope::Shared => settings::Scope::Own,
+                        settings::Scope::Own => settings::Scope::Shared,
+                    };
+                    self.message(Some(cid), format!("{}: Tab switches back", settings::theme_heading(panel.scope)));
+                }
                 Delete => match (&id, setting) {
-                    (_, Some(set)) => saved = Some((settings::write(set.key, None), format!("{} reset", set.key))),
+                    (_, Some(set)) => {
+                        saved = Some((settings::write(set.key, None, panel.scope), saved_text(panel, set.key, "reset")))
+                    }
                     (Some(RowId::Binding(a)), _) => {
                         saved = Some((settings::reset_binding(a), format!("{}: default keys", a.describe())))
                     }
@@ -2668,7 +2720,10 @@ impl Server {
                                 _ => None,
                             };
                             if let Some(v) = value {
-                                saved = Some((settings::write(set.key, Some(v)), format!("{} saved", set.key)));
+                                saved = Some((
+                                    settings::write(set.key, Some(v), panel.scope),
+                                    saved_text(panel, set.key, "saved"),
+                                ));
                             }
                         }
                         _ => {}

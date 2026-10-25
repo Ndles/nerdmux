@@ -82,6 +82,31 @@ pub const SETTINGS: &[Setting] = &[
     s("Theme", "theme.popup_fg", Kind::Color, "popup text"),
 ];
 
+/// Where the Theme section reads and writes: the theme every Nërd tool
+/// shares, or nerdmux's own `[theme]`, which goes on top of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scope {
+    Shared,
+    Own,
+}
+
+/// The Theme section's heading, saying which file it changes.
+pub fn theme_heading(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Shared => "Theme · all Nërd tools",
+        Scope::Own => "Theme · nerdmux only",
+    }
+}
+
+/// The file a setting is written to in `scope`.
+pub fn path_for(key: &str, scope: Scope) -> std::path::PathBuf {
+    if key.starts_with("theme.") && scope == Scope::Shared {
+        config::shared_theme_path()
+    } else {
+        config::config_path()
+    }
+}
+
 /// What a row of the panel stands for.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RowId {
@@ -95,8 +120,10 @@ pub struct Row {
     pub label: String,
     pub value: String,
     pub swatch: Option<Color>,
-    /// Set in the config file rather than left at the default.
+    /// Set in the file the row writes to, rather than left at the default.
     pub custom: bool,
+    /// For a shared theme color that nerdmux sets for itself: what it uses.
+    pub own: Option<(String, Color)>,
     /// Name in the config file or of the action, found by the filter too.
     pub key: String,
 }
@@ -118,6 +145,12 @@ pub struct Panel {
     /// Dotted keys present in the file, and actions with bindings there.
     pub custom_keys: Vec<String>,
     pub custom_actions: Vec<String>,
+    /// Which theme the Theme section shows and changes.
+    pub scope: Scope,
+    /// Dotted `theme.` keys present in the shared theme file, and the
+    /// theme it makes on its own.
+    pub shared_keys: Vec<String>,
+    pub shared_theme: Theme,
 }
 
 impl Panel {
@@ -129,6 +162,9 @@ impl Panel {
             mode: Mode::Browse,
             custom_keys: Vec::new(),
             custom_actions: Vec::new(),
+            scope: Scope::Shared,
+            shared_keys: Vec::new(),
+            shared_theme: Theme::default(),
         };
         p.reread();
         p
@@ -136,6 +172,10 @@ impl Panel {
 
     /// Note which settings the file sets, after it changed.
     pub fn reread(&mut self) {
+        let shared = load_doc(&config::shared_theme_path()).unwrap_or_default();
+        self.shared_keys =
+            SETTINGS.iter().filter(|s| get_item(&shared, s.key).is_some()).map(|s| s.key.into()).collect();
+        self.shared_theme = config::shared_theme(&mut Vec::new());
         let doc = load_doc(&config::config_path()).unwrap_or_default();
         self.custom_keys = SETTINGS.iter().filter(|s| get_item(&doc, s.key).is_some()).map(|s| s.key.into()).collect();
         self.custom_actions = Vec::new();
@@ -196,14 +236,24 @@ impl Panel {
 fn all_rows(config: &Config, panel: &Panel) -> Vec<Row> {
     let mut rows = Vec::new();
     for (i, set) in SETTINGS.iter().enumerate() {
-        let (value, swatch) = current(set, config);
+        let in_config = panel.custom_keys.iter().any(|k| k == set.key);
+        let shared = set.key.starts_with("theme.") && panel.scope == Scope::Shared;
+        let (value, swatch, custom, own) = if shared {
+            let (value, swatch) = current_in(set, config, &panel.shared_theme);
+            let own = in_config.then(|| current(set, config)).and_then(|(v, c)| Some((v, c?)));
+            (value, swatch, panel.shared_keys.iter().any(|k| k == set.key), own)
+        } else {
+            let (value, swatch) = current(set, config);
+            (value, swatch, in_config, None)
+        };
         rows.push(Row {
             id: RowId::Setting(i),
             section: set.section,
             label: set.label.into(),
             value,
             swatch,
-            custom: panel.custom_keys.iter().any(|k| k == set.key),
+            custom,
+            own,
             key: set.key.into(),
         });
     }
@@ -224,6 +274,7 @@ fn all_rows(config: &Config, panel: &Panel) -> Vec<Row> {
             value: if parts.is_empty() { "—".into() } else { parts.join("  ") },
             swatch: None,
             custom: panel.custom_actions.contains(&action.name()),
+            own: None,
             key: action.name(),
             id: RowId::Binding(action),
         });
@@ -281,11 +332,16 @@ fn on_off(b: bool) -> String {
 
 /// The value in force and, for colors, the color itself.
 pub fn current(set: &Setting, c: &Config) -> (String, Option<Color>) {
+    current_in(set, c, &c.theme)
+}
+
+/// The value in force, with theme settings read from `theme`.
+pub fn current_in(set: &Setting, c: &Config, theme: &Theme) -> (String, Option<Color>) {
     if let Some(name) = set.key.strip_prefix("theme.") {
         if name == "own_palette" {
-            return (on_off(c.theme.own_palette), None);
+            return (on_off(theme.own_palette), None);
         }
-        let color = theme_color(&c.theme, name);
+        let color = theme_color(theme, name);
         return (color.map(color_text).unwrap_or_default(), color);
     }
     let text = match set.key {
@@ -338,10 +394,14 @@ pub fn load_doc(path: &Path) -> Result<DocumentMut, String> {
             .map_err(|e| format!("{} has a mistake, fix it first: {}", path.display(), e.message())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             let mut doc = DocumentMut::new();
-            doc.decor_mut().set_prefix(
+            let header = if path == config::shared_theme_path() {
+                "# The theme every Nërd tool shares (nerdmux, nerdfleet, ...), written by nerdmux's\n\
+                 # settings panel (Alt+Space ,). A tool's own [theme] goes on top of it.\n\n"
+            } else {
                 "# nerdmux configuration, written by the settings panel (Alt+Space ,).\n\
-                 # `nerdmux config` prints a commented template of every option.\n\n",
-            );
+                 # `nerdmux config` prints a commented template of every option.\n\n"
+            };
+            doc.decor_mut().set_prefix(header);
             Ok(doc)
         }
         Err(e) => Err(format!("cannot read {}: {e}", path.display())),
@@ -437,10 +497,14 @@ fn keep_at_end(doc: &mut DocumentMut, comment: String) {
     }
 }
 
-/// Set `dotted` to `value`, or remove it with `None`, and save the file.
-pub fn write(dotted: &str, value: Option<Item>) -> Result<(), String> {
-    let path = config::config_path();
-    let mut doc = load_doc(&path)?;
+/// Set `dotted` to `value`, or remove it with `None`, in the file it
+/// belongs to in `scope`, and save that file.
+pub fn write(dotted: &str, value: Option<Item>, scope: Scope) -> Result<(), String> {
+    write_to(&path_for(dotted, scope), dotted, value)
+}
+
+fn write_to(path: &Path, dotted: &str, value: Option<Item>) -> Result<(), String> {
+    let mut doc = load_doc(path)?;
     let parts: Vec<&str> = dotted.split('.').collect();
     let (last, parents) = parts.split_last().ok_or("empty setting name")?;
     match value {
@@ -454,7 +518,7 @@ pub fn write(dotted: &str, value: Option<Item>) -> Result<(), String> {
             }
         }
     }
-    save_doc(&path, &doc)
+    save_doc(path, &doc)
 }
 
 /// Bind `key` to `action`, replacing the action's other keys in the same

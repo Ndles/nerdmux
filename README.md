@@ -101,7 +101,9 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
 `frame` can take, and makes a good starting point.
 
 A theme for every Nërd tool at once (nerdmux, nerdfleet, ...) goes in `~/.config/nerd-theme.toml`: the same `[theme]`
-table, `base` included. nerdmux puts its own `[theme]` on top, so a color set there changes nerdmux alone.
+table, `base` included. nerdmux puts its own `[theme]` on top, so a color set there changes nerdmux alone. The settings
+panel changes the shared theme; `Tab` switches its Theme section to nerdmux's own, and the shared view shows any color
+nerdmux keeps for itself. Edits to the file, from anywhere, show in running tools within a second.
 
 ## Things worth knowing
 

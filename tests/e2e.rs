@@ -98,6 +98,7 @@ impl Harness {
             ("LANG", "C.UTF-8"),
             ("NERDMUX_SOCKET", self.socket().to_str().unwrap()),
             ("NERDMUX_CONFIG", self.dir.join("config.toml").to_str().unwrap()),
+            ("NERD_THEME", self.dir.join("nerd-theme.toml").to_str().unwrap()),
             // Snapshots are written a moment after changes; keep it short.
             ("NERDMUX_SNAPSHOT_MS", "200"),
         ]
@@ -1596,15 +1597,43 @@ fn settings_panel_edits_the_config_file() {
     c.wait_for("the new value", |s| s.iter().any(|l| l.contains("150 ms")));
     assert!(file().contains("which_key_delay_ms = 150"), "{}", file());
 
-    // A color, written under [theme].
+    // A color goes to the theme every Nërd tool shares...
+    let shared = || std::fs::read_to_string(h.dir.join("nerd-theme.toml")).unwrap_or_default();
     c.code(KeyCode::Esc);
     c.typed("accent");
+    c.wait_text("Theme · all Nërd tools");
     c.code(KeyCode::Enter);
     c.key(Key::ctrl('u'));
     c.typed("#ff8800");
     c.code(KeyCode::Enter);
     c.wait_text("#FF8800");
-    assert!(file().contains("[theme]\naccent = \"#ff8800\""), "{}", file());
+    assert!(shared().contains("[theme]\naccent = \"#ff8800\""), "{}", shared());
+    assert!(!file().contains("accent"), "{}", file());
+
+    // ...or, after Tab, to nerdmux's own [theme], which the shared view then
+    // shows next to the shared color.
+    c.code(KeyCode::Tab);
+    c.wait_text("Theme · nerdmux only");
+    c.code(KeyCode::Enter);
+    c.key(Key::ctrl('u'));
+    c.typed("#00aa00");
+    c.code(KeyCode::Enter);
+    c.wait_text("#00AA00");
+    assert!(file().contains("[theme]\naccent = \"#00aa00\""), "{}", file());
+    c.code(KeyCode::Tab);
+    c.wait_for("both colors", |s| {
+        s.iter().any(|l| l.contains("#FF8800") && l.contains("nerdmux") && l.contains("#00AA00"))
+    });
+    // Del in nerdmux's view drops its own color again.
+    c.code(KeyCode::Tab);
+    c.code(KeyCode::Delete);
+    c.wait_for("the shared color back", |s| s.iter().any(|l| l.contains("accent") && l.contains("#FF8800")));
+    assert!(!file().contains("accent"), "{}", file());
+
+    // An edit to the shared file from elsewhere shows within a second.
+    std::fs::write(h.dir.join("nerd-theme.toml"), "[theme]\naccent = \"#123456\"\n").unwrap();
+    c.wait_text("#123456");
+    c.code(KeyCode::Tab);
 
     // A switch flips with an arrow, and Del puts the default back.
     c.code(KeyCode::Esc);

@@ -1080,7 +1080,7 @@ fn draw_settings(
     let width = cols.saturating_sub(4).clamp(20, 76);
     let rect = centered(cols, rows, width, rows.saturating_sub(2), false);
     let footer = match panel.mode {
-        Mode::Browse => "Enter change · ←→ adjust · Del reset · Esc close",
+        Mode::Browse => "Enter change · ←→ adjust · Del reset · Tab theme scope · Esc close",
         Mode::Edit(_) => "Enter save · Esc cancel",
         Mode::Capture => "press the new key · Esc cancel",
     };
@@ -1091,8 +1091,9 @@ fn draw_settings(
     let body = Style::default().fg(theme.popup_fg).bg(theme.popup_bg);
     let limit = inner.x + inner.width;
 
-    // Filter line, with the file the panel writes on the right.
-    let path = crate::server::tidy_path(&crate::config::config_path());
+    // Filter line, with the file the selected row writes to on the right.
+    let key = list.get(panel.selected).map_or("", |r| r.key.as_str());
+    let path = crate::server::tidy_path(&crate::settings::path_for(key, panel.scope));
     let room = limit.saturating_sub(inner.x + 4);
     let mut x = put(buf, inner.x + 1, inner.y, "› ", limit, body.fg(theme.cyan).add_modifier(Modifier::BOLD));
     if panel.query.is_empty() {
@@ -1146,6 +1147,7 @@ fn draw_settings(
         let y = inner.y + 2 + n as u16;
         let i = match line {
             Line::Head(name) => {
+                let name = if *name == "Theme" { crate::settings::theme_heading(panel.scope) } else { name };
                 put(buf, inner.x + 1, y, name, limit, body.fg(theme.magenta).add_modifier(Modifier::BOLD));
                 continue;
             }
@@ -1182,7 +1184,14 @@ fn draw_settings(
         }
         let value_style = if selected { style.add_modifier(Modifier::BOLD) } else { style.fg(theme.cyan) };
         let value = if r.value.is_empty() { "—".to_string() } else { r.value.clone() };
-        put(buf, vx, y, &truncate(&value, limit.saturating_sub(vx + 1)), limit, value_style);
+        vx = put(buf, vx, y, &truncate(&value, limit.saturating_sub(vx + 1)), limit, value_style);
+        // A shared color nerdmux overrides: what nerdmux shows instead.
+        if let Some((own, c)) = &r.own {
+            let note = if selected { style } else { style.fg(theme.dim) };
+            vx = put(buf, vx + 2, y, "nerdmux ", limit, note);
+            vx = put(buf, vx, y, "██", limit, style.fg(*c));
+            put(buf, vx + 1, y, &truncate(own, limit.saturating_sub(vx + 2)), limit, note);
+        }
     }
     match panel.mode {
         Mode::Edit(_) => cursor,
