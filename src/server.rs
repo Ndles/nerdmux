@@ -7,7 +7,7 @@ use crate::input;
 use crate::keys::{self, Action, Direction};
 use crate::layout::{self, Axis, Geometry, Node, PaneId, Preset};
 use crate::overlay::{
-    edit_text, Confirm, Overlay, Pending, PickItem, Picker, Prompt, PromptKind, SessionId, Target, WindowId,
+    edit_text, Confirm, Kill, Overlay, PickItem, Picker, Prompt, PromptKind, SessionId, Target, WindowId,
 };
 use crate::pane::{Notice, Pane, PaneEvent, SpawnOpts};
 use crate::proto::{
@@ -1666,7 +1666,7 @@ impl Server {
         let mut keep = true;
         let mut chosen: Option<Target> = None;
         let mut submitted: Option<(PromptKind, String)> = None;
-        let mut confirmed: Option<Pending> = None;
+        let mut confirmed: Option<Kill> = None;
         let mut pane_number: Option<usize> = None;
 
         let mut arrange: Option<Action> = None;
@@ -1829,9 +1829,9 @@ impl Server {
         }
         if let Some(pending) = confirmed {
             match pending {
-                Pending::KillPane(p) => self.close_pane(p),
-                Pending::KillWindow(s, w) => self.remove_window(s, w),
-                Pending::KillSession(s) => self.close_session(cid, s),
+                Kill::Pane(p) => self.close_pane(p),
+                Kill::Window(s, w) => self.remove_window(s, w),
+                Kill::Session(s) => self.close_session(cid, s),
             }
         }
         if let Some(n) = pane_number {
@@ -1883,7 +1883,7 @@ impl Server {
             }),
             ('x', Some(t)) => Overlay::Confirm(Confirm {
                 text: format!("Kill session {} and everything running in it?", name(self).unwrap_or_default()),
-                then: Pending::KillSession(t),
+                then: Kill::Session(t),
             }),
             _ => return,
         };
@@ -2200,7 +2200,7 @@ impl Server {
                         self,
                         Overlay::Confirm(Confirm {
                             text: format!("Close window {index} ({title})?"),
-                            then: Pending::KillWindow(sid, wid),
+                            then: Kill::Window(sid, wid),
                         }),
                     );
                 } else {
@@ -2233,7 +2233,7 @@ impl Server {
                         self,
                         Overlay::Confirm(Confirm {
                             text: format!("Close this pane ({name})?"),
-                            then: Pending::KillPane(active),
+                            then: Kill::Pane(active),
                         }),
                     );
                 } else {
@@ -2413,7 +2413,7 @@ impl Server {
                         self,
                         Overlay::Confirm(Confirm {
                             text: format!("Kill session {name} and everything running in it?"),
-                            then: Pending::KillSession(sid),
+                            then: Kill::Session(sid),
                         }),
                     );
                 } else {

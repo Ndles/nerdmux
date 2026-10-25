@@ -191,17 +191,6 @@ impl Panel {
         }
         self.selected = (self.selected as i32 + delta).clamp(0, len as i32 - 1) as usize;
     }
-
-    pub fn clamp_scroll(&mut self, height: usize) {
-        if height == 0 {
-            return;
-        }
-        if self.selected < self.scroll {
-            self.scroll = self.selected;
-        } else if self.selected >= self.scroll + height {
-            self.scroll = self.selected + 1 - height;
-        }
-    }
 }
 
 fn all_rows(config: &Config, panel: &Panel) -> Vec<Row> {

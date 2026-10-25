@@ -148,15 +148,15 @@ pub struct Prompt {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Pending {
-    KillPane(PaneId),
-    KillWindow(SessionId, WindowId),
-    KillSession(SessionId),
+pub enum Kill {
+    Pane(PaneId),
+    Window(SessionId, WindowId),
+    Session(SessionId),
 }
 
 pub struct Confirm {
     pub text: String,
-    pub then: Pending,
+    pub then: Kill,
 }
 
 /// Apply a key to a single-line text field. Returns true if the key was an edit.

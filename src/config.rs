@@ -320,6 +320,7 @@ impl Config {
     }
 
     /// Parse a config file; `theme.base` finds only the built-in themes.
+    #[cfg(test)]
     pub fn from_toml(text: &str) -> Config {
         Config::from_toml_in(text, None)
     }
