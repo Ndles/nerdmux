@@ -100,6 +100,9 @@ color set next to it still wins. Your own themes go in `~/.config/nerdmux/themes
 [themes/synthwave.toml](themes/synthwave.toml) sets every color nerdmux knows, including the gradients `status_bg` and
 `frame` can take, and makes a good starting point.
 
+A theme for every Nërd tool at once (nerdmux, nerdfleet, ...) goes in `~/.config/nerd-theme.toml`: the same `[theme]`
+table, `base` included. nerdmux puts its own `[theme]` on top, so a color set there changes nerdmux alone.
+
 ## Things worth knowing
 
 - **Best setup.** nerdmux looks as intended in a fast terminal with true color and the kitty keyboard protocol, such

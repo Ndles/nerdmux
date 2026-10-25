@@ -115,9 +115,24 @@ impl Terminal {
     }
 }
 
-/// The theme from the user's nerdmux config, or the default one.
+/// The theme the Nërd tools share: the default, with the user's
+/// `nerd-theme.toml` on top. A file with mistakes still gives a theme;
+/// `check_theme` says what was wrong.
 pub fn load_theme() -> Theme {
-    crate::config::Config::load().theme
+    crate::config::shared_theme(&mut Vec::new())
+}
+
+/// What is wrong with the shared theme file, if anything.
+pub fn check_theme() -> Vec<String> {
+    let mut warnings = Vec::new();
+    crate::config::shared_theme(&mut warnings);
+    warnings
+}
+
+/// Where the shared theme file is, whether it exists or not:
+/// `~/.config/nerd-theme.toml`, or `$NERD_THEME`.
+pub fn theme_path() -> PathBuf {
+    crate::config::shared_theme_path()
 }
 
 #[cfg(test)]

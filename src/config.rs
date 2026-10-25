@@ -262,15 +262,51 @@ fn find_theme(name: &str, dir: Option<&Path>) -> Result<String, String> {
     }
 }
 
+/// `$XDG_CONFIG_HOME`, or `~/.config`.
+fn config_home() -> PathBuf {
+    match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(x) if !x.is_empty() => PathBuf::from(x),
+        _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
+    }
+}
+
 pub fn config_path() -> PathBuf {
     if let Some(p) = std::env::var_os("NERDMUX_CONFIG") {
         return PathBuf::from(p);
     }
-    let base = match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(x) if !x.is_empty() => PathBuf::from(x),
-        _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
-    };
-    base.join("nerdmux").join("config.toml")
+    config_home().join("nerdmux").join("config.toml")
+}
+
+/// The theme every Nërd tool shares: `nerd-theme.toml` in the config
+/// directory, a `[theme]` table like the one in nerdmux's config. Each
+/// tool's own `[theme]`, where it has one, goes on top.
+pub fn shared_theme_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("NERD_THEME") {
+        return PathBuf::from(p);
+    }
+    config_home().join("nerd-theme.toml")
+}
+
+/// The default theme with the shared theme file on top. Problems become
+/// `warnings`, and what they affect keeps the default.
+pub fn shared_theme(warnings: &mut Vec<String>) -> Theme {
+    shared_theme_at(&shared_theme_path(), Some(&themes_dir()), warnings)
+}
+
+fn shared_theme_at(path: &Path, themes: Option<&Path>, warnings: &mut Vec<String>) -> Theme {
+    let mut t = Theme::default();
+    match std::fs::read_to_string(path) {
+        Ok(text) => match toml_edit::de::from_str::<ThemeFile>(&text) {
+            Ok(file) => layer_theme(&mut t, file.theme, themes, "nerd-theme.toml", warnings),
+            Err(e) => {
+                let first = e.message().lines().next().unwrap_or("syntax error").to_string();
+                warnings.push(format!("{} ignored: {first}", path.display()));
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => warnings.push(format!("cannot read {}: {e}", path.display())),
+    }
+    t
 }
 
 pub fn parse_color(v: &ThemeValue) -> Option<Color> {
@@ -307,16 +343,20 @@ impl Config {
     /// Load the config file. Never fails: problems become `warnings` and the
     /// affected settings keep their defaults.
     pub fn load() -> Config {
+        let mut warnings = Vec::new();
+        let shared = shared_theme(&mut warnings);
         let path = config_path();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => Config::from_toml_in(&text, Some(&themes_dir())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+        let mut c = match std::fs::read_to_string(&path) {
+            Ok(text) => Config::from_toml_on(&text, Some(&themes_dir()), shared),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config { theme: shared, ..Config::default() },
             Err(e) => {
-                let mut c = Config::default();
-                c.warnings.push(format!("cannot read {}: {e}", path.display()));
-                c
+                warnings.push(format!("cannot read {}: {e}", path.display()));
+                Config { theme: shared, ..Config::default() }
             }
-        }
+        };
+        warnings.append(&mut c.warnings);
+        c.warnings = warnings;
+        c
     }
 
     /// Parse a config file; `theme.base` finds only the built-in themes.
@@ -326,8 +366,14 @@ impl Config {
     }
 
     /// Parse a config file whose `theme.base` may also name a theme in `themes`.
+    #[cfg(test)]
     pub fn from_toml_in(text: &str, themes: Option<&Path>) -> Config {
-        let mut c = Config::default();
+        Config::from_toml_on(text, themes, Theme::default())
+    }
+
+    /// Parse a config file, its `[theme]` going on top of `theme`.
+    fn from_toml_on(text: &str, themes: Option<&Path>, theme: Theme) -> Config {
+        let mut c = Config { theme, ..Config::default() };
         let raw: Raw = match toml_edit::de::from_str(text) {
             Ok(r) => r,
             Err(e) => {
@@ -411,30 +457,7 @@ impl Config {
         if let Some(b) = raw.extended_keys {
             c.extended_keys = b;
         }
-        match raw.theme.get("base") {
-            None => {}
-            Some(ThemeValue::Text(name)) if name == "default" => {}
-            Some(ThemeValue::Text(name)) => match find_theme(name, themes) {
-                Ok(text) => match toml_edit::de::from_str::<ThemeFile>(&text) {
-                    Ok(mut file) => {
-                        if file.theme.remove("base").is_some() {
-                            c.warnings.push(format!("theme {name:?}: a theme cannot have a base of its own"));
-                        }
-                        let origin = format!("theme {name:?}");
-                        apply_theme(&mut c.theme, &file.theme, &origin, &mut c.warnings);
-                    }
-                    Err(e) => {
-                        let first = e.message().lines().next().unwrap_or("syntax error").to_string();
-                        c.warnings.push(format!("theme {name:?} ignored: {first}"));
-                    }
-                },
-                Err(e) => c.warnings.push(format!("config: {e}")),
-            },
-            Some(_) => c.warnings.push("config: theme.base needs a theme name".into()),
-        }
-        let mut own = raw.theme;
-        own.remove("base");
-        apply_theme(&mut c.theme, &own, "config", &mut c.warnings);
+        layer_theme(&mut c.theme, raw.theme, themes, "config", &mut c.warnings);
         let mut warnings = Vec::new();
         let mut apply = |table: &mut Table, entries: &BTreeMap<String, String>, which: &str| {
             for (key, action) in entries {
@@ -454,6 +477,43 @@ impl Config {
         c.warnings.extend(warnings);
         c
     }
+}
+
+/// Puts one layer of theme settings on `t`: a `base` starts over from that
+/// theme (built in, or `<name>.toml` in `themes`), then the colors set in
+/// the layer override it. `origin` names the layer in warnings.
+fn layer_theme(
+    t: &mut Theme,
+    mut entries: BTreeMap<String, ThemeValue>,
+    themes: Option<&Path>,
+    origin: &str,
+    warnings: &mut Vec<String>,
+) {
+    match entries.remove("base") {
+        None => {}
+        Some(ThemeValue::Text(name)) => {
+            *t = Theme::default();
+            if name != "default" {
+                match find_theme(&name, themes) {
+                    Ok(text) => match toml_edit::de::from_str::<ThemeFile>(&text) {
+                        Ok(mut file) => {
+                            if file.theme.remove("base").is_some() {
+                                warnings.push(format!("theme {name:?}: a theme cannot have a base of its own"));
+                            }
+                            apply_theme(t, &file.theme, &format!("theme {name:?}"), warnings);
+                        }
+                        Err(e) => {
+                            let first = e.message().lines().next().unwrap_or("syntax error").to_string();
+                            warnings.push(format!("theme {name:?} ignored: {first}"));
+                        }
+                    },
+                    Err(e) => warnings.push(format!("{origin}: {e}")),
+                }
+            }
+        }
+        Some(_) => warnings.push(format!("{origin}: theme.base needs a theme name")),
+    }
+    apply_theme(t, &entries, origin, warnings);
 }
 
 /// The stops of a gradient: two or more colors, each one valid.
@@ -548,6 +608,8 @@ restore = true               # after a crash or reboot, offer to bring the sessi
 # copy_command = "pbcopy"    # extra clipboard command; OSC 52 is always sent
 term = "xterm-256color"      # $TERM inside panes
 
+# The look every Nërd tool shares goes in ~/.config/nerd-theme.toml, a [theme] table
+# like the one below; colors set here go on top of it, for nerdmux alone.
 [theme]                      # "#rrggbb", a 0-255 palette index, or a color name
 # base = "synthwave"         # start from a theme: built in, or themes/<name>.toml here; colors below override it
 own_palette = true           # false: panes keep your terminal's own colors
@@ -703,6 +765,40 @@ mod tests {
         let c = Config::from_toml("[theme]\nbase = \"default\"\n");
         assert!(c.warnings.is_empty(), "{:?}", c.warnings);
         assert_eq!(c.theme, Theme::default());
+    }
+
+    #[test]
+    fn the_shared_theme_sits_under_the_config() {
+        let dir = std::env::temp_dir().join(format!("nerdmux-shared-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nerd-theme.toml");
+        let mut warnings = Vec::new();
+        assert_eq!(shared_theme_at(&path, None, &mut warnings), Theme::default(), "no file, the default");
+
+        std::fs::write(&path, "[theme]\naccent = \"#00ff00\"\nred = \"#ff0000\"\n").unwrap();
+        let shared = shared_theme_at(&path, None, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(shared.accent, Color::Rgb(0, 255, 0));
+
+        // The config's own colors win; the rest come from the shared file.
+        let c = Config::from_toml_on("[theme]\naccent = \"#0000ff\"\n", None, shared.clone());
+        assert_eq!(c.theme.accent, Color::Rgb(0, 0, 255));
+        assert_eq!(c.theme.red, Color::Rgb(255, 0, 0));
+        // A base in the config starts over from that theme.
+        let c = Config::from_toml_on("[theme]\nbase = \"default\"\n", None, shared.clone());
+        assert_eq!(c.theme, Theme::default());
+        // A config that does not parse keeps the shared theme.
+        let c = Config::from_toml_on("not toml at all [", None, shared.clone());
+        assert_eq!(c.theme, shared);
+
+        // The shared file may start from a theme itself.
+        std::fs::write(&path, "[theme]\nbase = \"synthwave\"\n").unwrap();
+        let based = Config::from_toml("[theme]\nbase = \"synthwave\"\n").theme;
+        assert_eq!(shared_theme_at(&path, None, &mut warnings), based);
+        std::fs::write(&path, "accent = 1\n").unwrap();
+        assert_eq!(shared_theme_at(&path, None, &mut warnings), Theme::default());
+        assert!(warnings.iter().any(|w| w.contains("ignored")), "{warnings:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
