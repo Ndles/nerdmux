@@ -214,7 +214,7 @@ fn badge(theme: &Theme, bg: Color) -> Style {
 /// lightness and chroma move straight, the hue takes the short way round, so
 /// a fade between two vivid colors stays vivid instead of passing gray. None when there is no
 /// gradient: fewer than two stops, or a stop that is not "#rrggbb".
-fn gradient(stops: &[Color], t: f32) -> Option<Color> {
+pub(crate) fn gradient(stops: &[Color], t: f32) -> Option<Color> {
     if stops.len() < 2 {
         return None;
     }
@@ -531,11 +531,10 @@ fn draw_borders(buf: &mut Buffer, area: Rect, geom: &Geometry, active: PaneId, t
     let (right, bottom) = (act.x as i32 + act.width as i32, act.y as i32 + act.height as i32);
     // The outline's color: the accent, or a fade from its top left corner
     // to its bottom right one.
-    let plain = theme.frame.first().copied().unwrap_or(theme.accent);
     let (span_x, span_y) = ((right - left).max(1) as f32, (bottom - top).max(1) as f32);
     let hot = |x: i32, y: i32| {
         let t = ((x - left) as f32 / span_x + (y - top) as f32 / span_y) / 2.0;
-        Style::default().fg(gradient(&theme.frame, t).unwrap_or(plain))
+        Style::default().fg(crate::embed::frame_color(theme, t))
     };
     let mut mark = |x: i32, y: i32, glyph: &str| {
         let (gx, gy) = (x - area.x as i32, y - area.y as i32);

@@ -125,6 +125,15 @@ impl Terminal {
     }
 }
 
+/// The color of the focused pane's outline at `t`, from 0 at its top left
+/// corner to 1 at its bottom right: the theme's `frame` colors faded
+/// across it, or its accent. A program drawing its own panes outlines the
+/// focused one with this, as nerdmux does.
+pub fn frame_color(theme: &Theme, t: f32) -> ratatui::style::Color {
+    let plain = theme.frame.first().copied().unwrap_or(theme.accent);
+    crate::render::gradient(&theme.frame, t).unwrap_or(plain)
+}
+
 /// The theme the Nërd tools share: the default, with the user's
 /// `nerd-theme.toml` on top. A file with mistakes still gives a theme;
 /// `check_theme` says what was wrong.
