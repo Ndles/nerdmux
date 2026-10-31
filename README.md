@@ -18,6 +18,24 @@ for panes, `Alt+Shift` for windows and sessions), and every action is the leader
 letter of what it does. No modes, nothing to memorize, and your shell keeps its own `Alt+letter` keys. It looks finished
 out of the box, in warm charcoal and amber, and a settings panel changes anything on the spot.
 
+## Install
+
+Releases carry one static binary per platform: `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
+`aarch64-apple-darwin` (Apple Silicon).
+
+```sh
+v=v0.1.1
+t=x86_64-unknown-linux-musl     # or aarch64-unknown-linux-musl, aarch64-apple-darwin
+curl -fLO https://github.com/Ndles/nerdmux/releases/download/$v/nerdmux-$v-$t.tar.gz
+curl -fLO https://github.com/Ndles/nerdmux/releases/download/$v/nerdmux-$v-$t.tar.gz.sha256
+sha256sum -c nerdmux-$v-$t.tar.gz.sha256
+tar xzf nerdmux-$v-$t.tar.gz
+install -m 755 nerdmux-$v-$t/nerdmux ~/.local/bin/nerdmux
+```
+
+On a Mac, check it with `shasum -a 256 -c` instead, and fetch it with `curl` as above: a copy downloaded in a browser
+is quarantined by Gatekeeper.
+
 ## Build
 
 Needs Rust 1.88 or newer.

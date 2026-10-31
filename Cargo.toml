@@ -1,6 +1,6 @@
 [package]
 name = "nerdmux"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Pavel Kuksa"]
 edition = "2021"
 description = "A terminal multiplexer with built-in sessions, windows, panes and easy keyboard navigation"
