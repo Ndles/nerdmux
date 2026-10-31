@@ -28,9 +28,25 @@ USAGE
                                 open a window in a session (the current
                                 one inside nerdmux); --reuse switches to
                                 the window called WINDOW if there is one
+  nerdmux run [-t NAME] [-n WINDOW] [--timeout SECS] -- COMMAND...
+                                run a command in a new window, wait for it, and
+                                print its output and exit with its code; 124
+                                when it outlives --timeout and keeps running,
+                                125 when nerdmux itself failed
+  nerdmux send [-t TARGET|-p PANE] [--enter] [--interrupt] [--] [TEXT...]
+                                type into a pane; --interrupt sends Ctrl+C first
+                                and --enter presses Enter last
+  nerdmux capture [-t TARGET|-p PANE] [-n LINES]
+                                print a pane's text, scrollback included
+  nerdmux panes [-t NAME]       list panes, one per line, tab-separated: session,
+                                window number, window name, pane, active, columns,
+                                rows, directory, program
   nerdmux keys                     print the key bindings
   nerdmux config                   print an example config file
   nerdmux config --path            print where the config file lives
+
+A TARGET is SESSION or SESSION:WINDOW, the window by name or number from 1.
+Inside nerdmux the default is the current pane.
 
 OPTIONS
   -S, --socket PATH             use another server socket ($NERDMUX_SOCKET)
@@ -66,6 +82,18 @@ fn print_keys() {
     for w in &config.warnings {
         eprintln!("warning: {w}");
     }
+}
+
+/// The pane this command runs in, when no other target was named.
+fn current_pane(targeted: bool) -> Option<u32> {
+    if targeted {
+        return None;
+    }
+    std::env::var("NERDMUX_PANE").ok().and_then(|p| p.parse().ok())
+}
+
+fn pane_arg(arg: Option<&String>) -> u32 {
+    arg.and_then(|p| p.parse().ok()).unwrap_or_else(|| fail("-p needs a pane number"))
 }
 
 /// The `nerdmux` command: parses the arguments, and runs the server or a
@@ -237,6 +265,71 @@ pub fn main() {
             let pane = std::env::var("NERDMUX_PANE").ok().and_then(|p| p.parse().ok());
             Request::NewWindow { target, pane, name, reuse, command }
         }
+        "run" => {
+            let (mut target, mut name, mut timeout, mut command) = (None, None, None, Vec::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-t" => target = Some(it.next().cloned().unwrap_or_else(|| fail("-t needs a name"))),
+                    "-n" | "--name" => name = Some(it.next().cloned().unwrap_or_else(|| fail("-n needs a name"))),
+                    "--timeout" => {
+                        let secs = it.next().and_then(|s| s.parse().ok());
+                        timeout = Some(secs.unwrap_or_else(|| fail("--timeout needs a number of seconds")));
+                    }
+                    "--" => {
+                        command = it.cloned().collect();
+                        break;
+                    }
+                    other => fail(&format!("unexpected argument {other}; put commands after --")),
+                }
+            }
+            if command.is_empty() {
+                fail("run needs a command: nerdmux run -- COMMAND...");
+            }
+            Request::Run { pane: current_pane(target.is_some()), target, name, timeout, command }
+        }
+        "send" | "send-keys" => {
+            let (mut target, mut pane, mut enter, mut interrupt, mut words) = (None, None, false, false, Vec::new());
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-t" => target = Some(it.next().cloned().unwrap_or_else(|| fail("-t needs a target"))),
+                    "-p" | "--pane" => pane = Some(pane_arg(it.next())),
+                    "--enter" => enter = true,
+                    "--interrupt" => interrupt = true,
+                    "--" => {
+                        words = it.cloned().collect();
+                        break;
+                    }
+                    other if other.starts_with('-') => fail(&format!("unknown option {other}; put text after --")),
+                    other => words.push(other.to_string()),
+                }
+            }
+            let text = words.join(" ");
+            if text.is_empty() && !enter && !interrupt {
+                fail("send needs text, --enter or --interrupt");
+            }
+            let pane = pane.or_else(|| current_pane(target.is_some()));
+            Request::Send { target, pane, text, enter, interrupt }
+        }
+        "capture" | "capture-pane" => {
+            let (mut target, mut pane, mut lines) = (None, None, None);
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-t" => target = Some(it.next().cloned().unwrap_or_else(|| fail("-t needs a target"))),
+                    "-p" | "--pane" => pane = Some(pane_arg(it.next())),
+                    "-n" | "--lines" => {
+                        let count = it.next().and_then(|s| s.parse().ok());
+                        lines = Some(count.unwrap_or_else(|| fail("-n needs a number of lines")));
+                    }
+                    other => fail(&format!("unexpected argument {other}")),
+                }
+            }
+            let pane = pane.or_else(|| current_pane(target.is_some()));
+            Request::Capture { target, pane, lines }
+        }
+        "panes" | "list-panes" => Request::Panes { target: named(&["-t"], &rest) },
         other => fail(&format!("unknown command {other:?}")),
     };
 
@@ -247,11 +340,14 @@ pub fn main() {
         socket = server::runtime_dir().join("plain.sock");
     }
 
+    // A script reads `run`'s code as its program's, so its own failures must not
+    // pass for one.
+    let failed = if matches!(request, Request::Run { .. }) { 125 } else { 1 };
     match client::run(&socket, request) {
         Ok(code) => std::process::exit(code),
         Err(e) => {
             eprintln!("nerdmux: {e:#}");
-            std::process::exit(1);
+            std::process::exit(failed);
         }
     }
 }

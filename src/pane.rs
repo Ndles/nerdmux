@@ -119,6 +119,8 @@ pub struct Pane {
     pub pid: Option<u32>,
     /// Set once the child has been reaped, so its pid is never signalled again.
     reaped: Arc<AtomicBool>,
+    /// The child's exit code, once it has been reaped.
+    exit_code: Arc<Mutex<Option<u32>>>,
     /// Title set by the program through OSC 0/2.
     pub title: String,
     /// Process group that set `title`; the title is dropped once another
@@ -209,8 +211,13 @@ impl Pane {
 
         let reaped = Arc::new(AtomicBool::new(false));
         let reaped_flag = reaped.clone();
+        let exit_code = Arc::new(Mutex::new(None));
+        let exit_slot = exit_code.clone();
         thread::Builder::new().name(format!("pane-{id}-wait")).spawn(move || {
-            let _ = child.wait();
+            let status = child.wait();
+            if let (Ok(status), Ok(mut slot)) = (status, exit_slot.lock()) {
+                *slot = Some(status.exit_code());
+            }
             reaped_flag.store(true, Ordering::SeqCst);
             let _ = tx.send(PaneEvent::Exit(id).into());
         })?;
@@ -246,6 +253,7 @@ impl Pane {
             writer,
             pid,
             reaped,
+            exit_code,
             title: String::new(),
             title_owner: None,
             shell,
@@ -474,6 +482,29 @@ impl Pane {
             sel.include_all();
             self.term.selection = Some(sel);
         }
+    }
+
+    /// Columns and rows.
+    pub fn size(&self) -> (u16, u16) {
+        (self.cols, self.rows)
+    }
+
+    /// The program's exit code, once it has ended.
+    pub fn exit_code(&self) -> Option<u32> {
+        self.exit_code.lock().ok().and_then(|code| *code)
+    }
+
+    /// The pane's text, scrollback included: all of it, or its last `lines`.
+    /// A line the terminal wrapped comes back whole, and the blank rows below
+    /// the last output are left out.
+    pub fn capture(&self, lines: Option<usize>) -> String {
+        let start = Point::new(self.term.topmost_line(), Column(0));
+        let end = Point::new(self.term.bottommost_line(), self.term.last_column());
+        let text = self.term.bounds_to_string(start, end);
+        let text = text.trim_end();
+        let Some(lines) = lines else { return text.to_string() };
+        let skip = text.lines().count().saturating_sub(lines);
+        text.lines().skip(skip).collect::<Vec<_>>().join("\n")
     }
 
     /// Select everything, scrollback included.

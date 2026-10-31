@@ -82,6 +82,26 @@ nerdmux new-window -n top --reuse -- btop  # open a window running btop, or go b
 nerdmux attach --plain -t fleet  # no status bar or keys of its own, on a separate server: for use inside another program
 ```
 
+### From a script
+
+Programs, agents among them, can drive panes through the same socket. `-S PATH` keeps them on a server of their own,
+away from your sessions.
+
+```sh
+nerdmux run -t work -n tests --timeout 300 -- make test   # output on stdout, its exit code as ours
+nerdmux send -t work:tests --enter -- 'git status'        # type into a pane; --interrupt sends Ctrl+C first
+nerdmux capture -t work -n 200                            # a pane's text, scrollback included
+nerdmux panes -t work                                     # one line per pane, tab-separated
+```
+
+`run` opens a window for the command, leaves your active window alone, and answers when the command ends. It needs no
+shell integration, because the command is the window's program. It exits with the command's code, 124 if the command
+outlives `--timeout` and keeps running (the message names its pane), and 125 if nerdmux itself failed.
+
+A target is `SESSION` or `SESSION:WINDOW`, the window by name or by number from 1, or use `-p PANE` for a pane id.
+Inside nerdmux the default is the current pane. The columns of `panes` are session, window number, window name, pane,
+active (1 or 0), columns, rows, directory and program.
+
 ### After a crash or reboot
 
 nerdmux keeps a snapshot of its sessions in `~/.local/state/nerdmux/`, readable only by you, and deletes it when it ends
