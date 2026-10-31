@@ -91,6 +91,33 @@ impl Terminal {
         self.pane.send_paste(text);
     }
 
+    /// Passes on a mouse event at `(col, row)` within the terminal. A program
+    /// that asked for the mouse gets it. Otherwise the wheel still scrolls:
+    /// arrow keys for a full-screen program, the scrollback for anything else.
+    /// Returns whether anything was done with it.
+    pub fn mouse(&mut self, event: crossterm::event::MouseEvent, col: u16, row: u16) -> bool {
+        use crate::proto::{Key, KeyCode, MouseKind};
+        use alacritty_terminal::term::TermMode;
+        let Some(m) = crate::client::convert_mouse(event) else { return false };
+        let up = match m.kind {
+            MouseKind::ScrollUp => true,
+            MouseKind::ScrollDown => false,
+            _ => return self.pane.send_mouse(m, col, row),
+        };
+        let mode = self.pane.mode();
+        if self.pane.wants_mouse() {
+            self.pane.send_mouse(m, col, row);
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+            let key = Key::plain(if up { KeyCode::Up } else { KeyCode::Down });
+            for _ in 0..3 {
+                self.pane.write(crate::input::encode_key(key, mode));
+            }
+        } else {
+            self.pane.scroll(if up { 3 } else { -3 });
+        }
+        true
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.pane.resize(cols, rows);
     }
@@ -180,5 +207,56 @@ mod tests {
         term.draw(&mut buf, area, &Theme::default(), false);
         let first: String = (0..40).map(|x| buf[(x, 0)].symbol().to_string()).collect();
         assert_eq!(first.trim_end(), "hello from embed");
+    }
+    /// Runs `command` to its end, `cols` by `rows`, and returns its terminal.
+    fn finished(command: Vec<String>, cols: u16, rows: u16) -> Terminal {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<TerminalEvent>(64);
+        let env = vec![("PATH".to_string(), std::env::var("PATH").unwrap_or_default())];
+        let mut term = Terminal::spawn(7, Options { cols, rows, command, cwd: None, env: &env }, tx).unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(5)).expect("the program reports back") {
+                TerminalEvent::Output(_, bytes) => {
+                    term.feed(&bytes);
+                }
+                // The exit can overtake the last output; the end of output cannot.
+                TerminalEvent::Eof(_) => return term,
+                TerminalEvent::Exit(_) => {}
+            }
+        }
+    }
+
+    fn wheel(kind: crossterm::event::MouseEventKind) -> crossterm::event::MouseEvent {
+        use crossterm::event::{KeyModifiers, MouseEvent};
+        MouseEvent { kind, column: 0, row: 0, modifiers: KeyModifiers::NONE }
+    }
+
+    fn top_line(term: &mut Terminal, cols: u16, rows: u16) -> String {
+        let area = Rect::new(0, 0, cols, rows);
+        let mut buf = Buffer::empty(area);
+        term.draw(&mut buf, area, &Theme::default(), true);
+        (0..cols).map(|x| buf[(x, 0)].symbol().to_string()).collect::<String>().trim_end().to_string()
+    }
+
+    #[test]
+    fn the_wheel_scrolls_a_plain_program_through_its_scrollback() {
+        use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};
+        let command = vec!["sh".into(), "-c".into(), "i=1; while [ $i -le 50 ]; do echo $i; i=$((i+1)); done".into()];
+        let mut term = finished(command, 20, 4);
+        let bottom = top_line(&mut term, 20, 4);
+        assert!(term.mouse(wheel(ScrollUp), 0, 0));
+        let scrolled: u32 = top_line(&mut term, 20, 4).parse().unwrap();
+        assert_eq!(scrolled, bottom.parse::<u32>().unwrap() - 3);
+        assert!(term.mouse(wheel(ScrollDown), 0, 0));
+        assert_eq!(top_line(&mut term, 20, 4), bottom);
+    }
+
+    #[test]
+    fn a_click_goes_nowhere_unless_the_program_asked_for_the_mouse() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        let mut plain = finished(vec!["true".into()], 20, 4);
+        assert!(!plain.mouse(wheel(MouseEventKind::Down(MouseButton::Left)), 0, 0));
+        let asks = vec!["printf".into(), "\\033[?1000h\\033[?1006h".into()];
+        let mut wants = finished(asks, 20, 4);
+        assert!(wants.mouse(wheel(MouseEventKind::Down(MouseButton::Left)), 0, 0));
     }
 }
