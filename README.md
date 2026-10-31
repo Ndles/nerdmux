@@ -20,7 +20,7 @@ out of the box, in warm charcoal and amber, and a settings panel changes anythin
 
 ## Build
 
-Needs Rust 1.85 or newer.
+Needs Rust 1.88 or newer.
 
 ```sh
 cargo install --path .      # puts `nerdmux` in ~/.cargo/bin
