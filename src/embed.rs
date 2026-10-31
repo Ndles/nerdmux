@@ -198,7 +198,9 @@ mod tests {
         while !ended {
             match rx.recv_timeout(Duration::from_secs(5)).expect("the program reports back") {
                 TerminalEvent::Output(7, bytes) => assert!(term.feed(&bytes).is_empty()),
-                TerminalEvent::Eof(7) | TerminalEvent::Exit(7) => ended = true,
+                // The exit can overtake the last output; the end of output cannot.
+                TerminalEvent::Eof(7) => ended = true,
+                TerminalEvent::Exit(7) => {}
                 other => panic!("unexpected {other:?}"),
             }
         }

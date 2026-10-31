@@ -10,7 +10,7 @@ use crate::server::{window_area, window_title, Client, ClientId, Server, Session
 use alacritty_terminal::term::cell::{Flags, Hyperlink};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor};
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::{Buffer, Cell, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use std::collections::HashMap;
@@ -57,7 +57,10 @@ pub fn diff<'a>(
     for (i, (current, previous)) in next.content.iter().zip(prev.content.iter()).enumerate() {
         let link = next_links.get(i).and_then(Option::as_ref);
         let link_changed = link != prev_links.get(i).and_then(Option::as_ref);
-        if !current.skip && (current != previous || link_changed || invalidated > 0) && to_skip == 0 {
+        if current.diff_option != CellDiffOption::Skip
+            && (current != previous || link_changed || invalidated > 0)
+            && to_skip == 0
+        {
             let (x, y) = next.pos_of(i);
             updates.push((x, y, current, link));
         }
@@ -131,7 +134,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, limit: u16, style: Style) -
             cell.set_char(c);
             cell.modifier = Modifier::empty();
             cell.underline_color = Color::Reset;
-            cell.skip = false;
+            cell.set_diff_option(CellDiffOption::None);
             cell.set_style(style);
         }
         for extra in 1..w {
@@ -139,7 +142,7 @@ fn put(buf: &mut Buffer, x: u16, y: u16, text: &str, limit: u16, style: Style) -
                 cell.set_symbol(" ");
                 cell.modifier = Modifier::empty();
                 cell.underline_color = Color::Reset;
-                cell.skip = false;
+                cell.set_diff_option(CellDiffOption::None);
                 cell.set_style(style);
             }
         }
@@ -156,7 +159,7 @@ fn fill(buf: &mut Buffer, rect: Rect, style: Style) {
                 cell.set_symbol(" ");
                 cell.modifier = Modifier::empty();
                 cell.underline_color = Color::Reset;
-                cell.skip = false;
+                cell.set_diff_option(CellDiffOption::None);
                 cell.set_style(style);
             }
         }
@@ -410,12 +413,14 @@ pub fn draw_pane(
         let wide = flags.contains(Flags::WIDE_CHAR);
         let clipped_wide = wide && col + 1 >= rect.width as usize;
         let c = cell.c;
-        target.skip = false;
+        target.set_diff_option(CellDiffOption::None);
         if flags.contains(Flags::WIDE_CHAR_SPACER) {
             // The second half of a wide character: the terminal fills it in
             // when the character itself is printed, so never draw it.
             target.set_symbol(" ");
-            target.skip = !(col == 0 || flags.contains(Flags::HIDDEN));
+            if col != 0 && !flags.contains(Flags::HIDDEN) {
+                target.set_diff_option(CellDiffOption::Skip);
+            }
         } else if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
             || clipped_wide
             || flags.contains(Flags::HIDDEN)
