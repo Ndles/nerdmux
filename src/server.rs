@@ -66,6 +66,26 @@ impl From<PaneEvent> for Event {
     }
 }
 
+/// A client waiting for a pane to end. A program's exit can overtake its last
+/// output, so the pane stays until both have arrived. Its exit normally hangs up
+/// the terminal, which ends the output too; `grace` is the backstop, so that a
+/// terminal left open some other way cannot keep the client waiting forever.
+struct RunWait {
+    link: Link,
+    eof: bool,
+    exited: bool,
+    grace: Option<Instant>,
+    deadline: Option<Instant>,
+    timeout: u32,
+}
+
+/// How long the rest of a finished program's output gets to arrive.
+const RUN_GRACE: Duration = Duration::from_millis(300);
+/// `nerdmux run`: the program outlived `--timeout`, and is still running.
+const RUN_TIMED_OUT: i32 = 124;
+/// `nerdmux run`: nerdmux itself failed, so no program's code is to be had.
+const RUN_FAILED: i32 = 125;
+
 #[derive(Clone)]
 pub struct Window {
     pub id: WindowId,
@@ -266,6 +286,8 @@ pub struct Server {
     conns: HashMap<ClientId, Link>,
     /// Sessions whose panes must be resized before the next frame.
     layout_pending: BTreeSet<SessionId>,
+    /// Panes started by `nerdmux run`, whose client is waiting for them to end.
+    runs: HashMap<PaneId, RunWait>,
     tx: SyncSender<Event>,
     socket: String,
     next_id: u32,
@@ -411,6 +433,7 @@ impl Server {
             clients: BTreeMap::new(),
             conns: HashMap::new(),
             layout_pending: BTreeSet::new(),
+            runs: HashMap::new(),
             tx,
             socket,
             next_id: 1,
@@ -520,6 +543,9 @@ impl Server {
     fn next_timer(&self) -> Option<Instant> {
         let mut next: Option<Instant> = None;
         let mut consider = |t: Instant| next = Some(next.map_or(t, |n| n.min(t)));
+        for run in self.runs.values() {
+            run.grace.into_iter().chain(run.deadline).for_each(&mut consider);
+        }
         for c in self.clients.values() {
             if let Some(p) = &c.prefix {
                 match p.repeat_until {
@@ -546,7 +572,57 @@ impl Server {
         next
     }
 
+    /// Note the end of a pane's output or program. False when no client is
+    /// waiting for this pane, which then closes as usual.
+    fn run_ended(&mut self, id: PaneId, eof: bool) -> bool {
+        let Some(run) = self.runs.get_mut(&id) else { return false };
+        if eof {
+            run.eof = true;
+        } else {
+            run.exited = true;
+            run.grace = Some(Instant::now() + RUN_GRACE);
+        }
+        if run.eof && run.exited {
+            self.finish_run(id);
+        }
+        true
+    }
+
+    /// Answer the client waiting for a pane that has ended, and close the pane.
+    fn finish_run(&mut self, id: PaneId) {
+        let Some(run) = self.runs.remove(&id) else { return };
+        let Some(pane) = self.panes.get(&id) else { return };
+        let text = pane.capture(None);
+        let code = pane.exit_code().map_or(RUN_FAILED, |code| code as i32);
+        send_text(&run.link, text);
+        let _ = run.link.send(S2C::Exit { message: String::new(), code });
+        self.close_pane(id);
+    }
+
+    /// Runs whose time is up, and panes closed while a client waited for them.
+    fn check_runs(&mut self, now: Instant) {
+        let ids: Vec<PaneId> = self.runs.keys().copied().collect();
+        for id in ids {
+            let run = &self.runs[&id];
+            let (grace_over, timed_out) =
+                (run.grace.is_some_and(|t| now >= t), run.deadline.is_some_and(|t| now >= t));
+            if !self.panes.contains_key(&id) {
+                let run = self.runs.remove(&id).expect("listed above");
+                let message = format!("nerdmux: pane {id} was closed before its program ended");
+                let _ = run.link.send(S2C::Exit { message, code: RUN_FAILED });
+            } else if grace_over {
+                self.finish_run(id);
+            } else if timed_out {
+                let run = self.runs.remove(&id).expect("listed above");
+                send_text(&run.link, self.panes[&id].capture(None));
+                let message = format!("nerdmux: still running in pane {id} after {}s", run.timeout);
+                let _ = run.link.send(S2C::Exit { message, code: RUN_TIMED_OUT });
+            }
+        }
+    }
+
     fn tick(&mut self, now: Instant) {
+        self.check_runs(now);
         let delay = self.config.which_key_delay;
         for c in self.clients.values_mut() {
             if c.stale && c.link.backlog() < MAX_BACKLOG {
@@ -626,8 +702,16 @@ impl Server {
                     }
                 }
             }
-            Event::PtyEof(id) => self.close_pane(id),
-            Event::ChildExit(id) => self.close_pane(id),
+            Event::PtyEof(id) => {
+                if !self.run_ended(id, true) {
+                    self.close_pane(id);
+                }
+            }
+            Event::ChildExit(id) => {
+                if !self.run_ended(id, false) {
+                    self.close_pane(id);
+                }
+            }
             Event::NewClient(stream) => self.accept(stream),
             Event::ClientMsg(id, msg) => self.client_msg(id, msg),
             Event::ClientGone(id) => {
@@ -858,6 +942,44 @@ impl Server {
                 self.run_action(cid, sid, action);
                 reply(String::new(), 0);
             }
+            Request::Send { target, pane, text, enter, interrupt } => {
+                match self.resolve_pane(target.as_deref(), pane) {
+                    Ok(id) => {
+                        let mut bytes = Vec::with_capacity(text.len() + 2);
+                        if interrupt {
+                            bytes.push(0x03);
+                        }
+                        bytes.extend_from_slice(text.as_bytes());
+                        if enter {
+                            bytes.push(b'\r');
+                        }
+                        self.panes[&id].write(bytes);
+                        reply(String::new(), 0);
+                    }
+                    Err(e) => reply(format!("nerdmux: {e}"), 1),
+                }
+            }
+            Request::Capture { target, pane, lines } => {
+                match self.resolve_pane(target.as_deref(), pane) {
+                    Ok(id) => reply(self.panes[&id].capture(lines.map(|n| n as usize)), 0),
+                    Err(e) => reply(format!("nerdmux: {e}"), 1),
+                }
+            }
+            Request::Panes { target } => {
+                let sid = match &target {
+                    Some(t) => match self.find_session(t) {
+                        Some(sid) => Some(sid),
+                        None => return reply(format!("nerdmux: no session named {t:?}"), 1),
+                    },
+                    None => None,
+                };
+                reply(self.pane_table(sid), 0);
+            }
+            Request::Run { target, pane, name, timeout, command } => {
+                if let Err(e) = self.start_run(&link, target.as_deref(), pane, name, timeout, command, cwd) {
+                    reply(format!("nerdmux: {e}"), RUN_FAILED);
+                }
+            }
             Request::NewWindow { target, pane, name, reuse, command } => {
                 let by_pane = pane.and_then(|p| {
                     self.sessions.iter().find(|s| s.windows.iter().any(|w| w.layout.contains(p))).map(|s| s.id)
@@ -913,6 +1035,106 @@ impl Server {
                 c.message = Some((text, Instant::now() + MESSAGE_TIME * 3));
             }
         }
+    }
+
+    /// The pane a request means: `pane` if given, else the active pane of
+    /// `target` (`SESSION` or `SESSION:WINDOW`, by name or from 1), else of the
+    /// session used last.
+    fn resolve_pane(&self, target: Option<&str>, pane: Option<u32>) -> Result<PaneId, String> {
+        if let Some(id) = pane {
+            return if self.panes.contains_key(&id) { Ok(id) } else { Err(format!("no pane {id}")) };
+        }
+        let Some(target) = target else {
+            let session = self.sessions.iter().max_by_key(|s| s.used).ok_or("no sessions")?;
+            return Ok(session.window().active);
+        };
+        if let Some(sid) = self.find_session(target) {
+            return self.active_pane(sid).ok_or_else(|| "no such session".to_string());
+        }
+        let no_session = || format!("no session named {target:?}");
+        let (name, window) = target.rsplit_once(':').ok_or_else(no_session)?;
+        let sid = self.find_session(name).ok_or_else(no_session)?;
+        let session = self.sessions.iter().find(|s| s.id == sid).ok_or_else(no_session)?;
+        let found = session.windows.iter().find(|w| w.name.as_deref() == Some(window)).or_else(|| {
+            let index = window.parse::<usize>().ok()?.checked_sub(1)?;
+            session.windows.get(index)
+        });
+        found.map(|w| w.active).ok_or_else(|| format!("no window {window:?} in session {name:?}"))
+    }
+
+    /// One line per pane, tab-separated: session, window number, window name,
+    /// pane id, whether it is the session's active pane (1 or 0), columns, rows,
+    /// working directory and foreground program.
+    fn pane_table(&self, only: Option<SessionId>) -> String {
+        let field = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+        let mut rows = Vec::new();
+        for session in self.sessions.iter().filter(|s| only.is_none_or(|sid| s.id == sid)) {
+            for (i, window) in session.windows.iter().enumerate() {
+                for id in window.layout.panes() {
+                    let Some(pane) = self.panes.get(&id) else { continue };
+                    let active = window.id == session.active && window.active == id;
+                    let (cols, rows_) = pane.size();
+                    let cwd = pane.cwd().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+                    let program = pane.foreground_pid().and_then(crate::procinfo::name).unwrap_or_default();
+                    rows.push(format!(
+                        "{}\t{}\t{}\t{id}\t{}\t{cols}\t{rows_}\t{}\t{}",
+                        field(&session.name),
+                        i + 1,
+                        field(window.name.as_deref().unwrap_or_default()),
+                        u8::from(active),
+                        field(&cwd),
+                        field(&program),
+                    ));
+                }
+            }
+        }
+        rows.join("\n")
+    }
+
+    /// Open the window for `nerdmux run`, leaving the active window as it was,
+    /// and note the client waiting for it.
+    #[allow(clippy::too_many_arguments)]
+    fn start_run(
+        &mut self,
+        link: &Link,
+        target: Option<&str>,
+        pane: Option<u32>,
+        name: Option<String>,
+        timeout: Option<u32>,
+        command: Vec<String>,
+        cwd: String,
+    ) -> Result<(), String> {
+        let by_pane = pane.and_then(|p| {
+            self.sessions.iter().find(|s| s.windows.iter().any(|w| w.layout.contains(p))).map(|s| s.id)
+        });
+        let sid = match target {
+            Some(t) => self.find_session(t).ok_or_else(|| format!("no session named {t:?}"))?,
+            None => by_pane
+                .or_else(|| self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id))
+                .ok_or("no sessions")?,
+        };
+        let session = self.sessions.iter().find(|s| s.id == sid).ok_or("no such session")?;
+        let (active, last) = (session.active, session.last);
+        let wid = self.new_window(sid, Some(command), Some(PathBuf::from(cwd)))?;
+        let session = self.sessions.iter_mut().find(|s| s.id == sid).ok_or("no such session")?;
+        session.active = active;
+        session.last = last;
+        let window = session.windows.iter_mut().find(|w| w.id == wid).ok_or("no such window")?;
+        window.name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+        let id = window.active;
+        self.dirty = true;
+        self.runs.insert(
+            id,
+            RunWait {
+                link: link.clone(),
+                eof: false,
+                exited: false,
+                grace: None,
+                deadline: timeout.map(|secs| Instant::now() + Duration::from_secs(secs.into())),
+                timeout: timeout.unwrap_or_default(),
+            },
+        );
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2769,7 +2991,7 @@ impl Server {
             });
             for (i, w) in s.windows.iter().enumerate() {
                 let panes = w.layout.panes();
-                let cwd = self.panes.get(&w.active).and_then(|p| p.cwd()).map(&tidy).unwrap_or_default();
+                let cwd = self.panes.get(&w.active).and_then(|p| p.cwd()).map(tidy).unwrap_or_default();
                 items.push(PickItem {
                     label: format!("{}: {}", i + 1, window_title(w, &self.panes)),
                     detail: if panes.len() > 1 { format!("{} panes", panes.len()) } else { cwd },
@@ -2782,7 +3004,7 @@ impl Server {
                         let Some(p) = self.panes.get(pid) else { continue };
                         items.push(PickItem {
                             label: format!("{}.{} {}", i + 1, n + 1, p.name),
-                            detail: p.cwd().map(&tidy).unwrap_or_default(),
+                            detail: p.cwd().map(tidy).unwrap_or_default(),
                             indent: 2,
                             current: false,
                             target: Target::Pane(s.id, w.id, *pid),
@@ -2867,6 +3089,14 @@ pub fn runtime_dir() -> PathBuf {
     }
     let tmp = std::env::var_os("TMPDIR").filter(|d| !d.is_empty()).map(PathBuf::from);
     tmp.unwrap_or_else(|| PathBuf::from("/tmp")).join(format!("nerdmux-{uid}"))
+}
+
+/// Send a pane's text as a client's program output, ending in a newline.
+fn send_text(link: &Link, mut text: String) {
+    if !text.is_empty() {
+        text.push('\n');
+        let _ = link.send(S2C::Output(text.into_bytes()));
+    }
 }
 
 pub fn default_socket() -> PathBuf {

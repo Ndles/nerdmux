@@ -1726,3 +1726,220 @@ fn plain_sessions_get_a_server_of_their_own() {
         .envs(env)
         .output();
 }
+
+// ===== driving panes from a script ==========================================
+
+fn text(out: &[u8]) -> String {
+    String::from_utf8_lossy(out).into_owned()
+}
+
+/// The rows of `nerdmux panes`, split into fields.
+fn panes(h: &Harness) -> Vec<Vec<String>> {
+    h.stdout(&["panes"]).lines().map(|l| l.split('\t').map(str::to_string).collect()).collect()
+}
+
+/// Wait until `check` holds of what the session's active pane shows.
+fn wait_capture(h: &Harness, args: &[&str], check: impl Fn(&str) -> bool) -> String {
+    let until = Instant::now() + TIMEOUT;
+    loop {
+        let got = h.stdout(&[&["capture"], args].concat());
+        if check(&got) {
+            return got;
+        }
+        assert!(Instant::now() < until, "pane never showed what was expected:\n{got}");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+#[test]
+fn run_returns_a_commands_output_and_exit_code() {
+    let h = Harness::new();
+    let ok = h.nerdmux(&["run", "--", "sh", "-c", "echo hello; echo there"]);
+    assert_eq!(ok.status.code(), Some(0));
+    assert_eq!(text(&ok.stdout), "hello\nthere\n");
+
+    let failed = h.nerdmux(&["run", "--", "sh", "-c", "echo broke; exit 3"]);
+    assert_eq!(failed.status.code(), Some(3));
+    assert_eq!(text(&failed.stdout), "broke\n", "a failing command's output is still its output");
+    assert_eq!(text(&failed.stderr), "");
+}
+
+#[test]
+fn run_closes_its_window_when_the_command_ends() {
+    let h = Harness::new();
+    assert_eq!(panes(&h).len(), 1);
+    h.nerdmux(&["run", "--", "true"]);
+    assert_eq!(panes(&h).len(), 1);
+}
+
+#[test]
+fn run_keeps_the_last_of_the_output_however_the_exit_races_it() {
+    // A program's exit can overtake its last output.
+    let h = Harness::new();
+    for _ in 0..15 {
+        let out = h.nerdmux(&["run", "--", "seq", "1", "400"]);
+        assert_eq!(text(&out.stdout).lines().last(), Some("400"));
+        assert_eq!(text(&out.stdout).lines().count(), 400);
+    }
+}
+
+#[test]
+fn run_does_not_wait_for_a_background_child_holding_the_terminal() {
+    let h = Harness::new();
+    let began = Instant::now();
+    let out = h.nerdmux(&["run", "--", "sh", "-c", "sleep 30 & echo done"]);
+    assert!(began.elapsed() < Duration::from_secs(5), "took {:?}", began.elapsed());
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(text(&out.stdout), "done\n");
+}
+
+#[test]
+fn run_past_its_timeout_reports_it_and_leaves_the_program_running() {
+    let h = Harness::new();
+    let out = h.nerdmux(&["run", "--timeout", "1", "-n", "job", "--", "sh", "-c", "echo started; sleep 30"]);
+    assert_eq!(out.status.code(), Some(124));
+    assert_eq!(text(&out.stdout), "started\n");
+
+    let job = panes(&h).into_iter().find(|p| p[2] == "job").expect("the window stays");
+    let id = job[3].clone();
+    assert!(text(&out.stderr).contains(&format!("pane {id}")), "{}", text(&out.stderr));
+    assert_eq!(h.stdout(&["capture", "-p", &id]).trim(), "started");
+
+    // And it can still be stopped.
+    assert!(h.nerdmux(&["send", "-p", &id, "--interrupt"]).status.success());
+    let until = Instant::now() + TIMEOUT;
+    while panes(&h).iter().any(|p| p[3] == id) {
+        assert!(Instant::now() < until, "the interrupt did not end the program");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+#[test]
+fn run_leaves_the_active_window_alone() {
+    let h = Harness::new();
+    let first = panes(&h)[0][3].clone();
+    let out = h.nerdmux(&["run", "--timeout", "1", "--", "sleep", "30"]);
+    assert_eq!(out.status.code(), Some(124));
+    let rows = panes(&h);
+    assert_eq!(rows.len(), 2);
+    let active: Vec<&str> = rows.iter().filter(|p| p[4] == "1").map(|p| p[3].as_str()).collect();
+    assert_eq!(active, vec![first.as_str()]);
+}
+
+#[test]
+fn run_says_when_nerdmux_itself_failed_with_a_code_of_its_own() {
+    let h = Harness::new();
+    let missing = h.nerdmux(&["run", "-t", "nope", "--", "true"]);
+    assert_eq!(missing.status.code(), Some(125));
+    assert!(text(&missing.stderr).contains("no session"), "{}", text(&missing.stderr));
+}
+
+#[test]
+fn run_answers_when_its_window_is_closed_under_it() {
+    let h = Harness::new();
+    h.nerdmux(&["new", "-d", "-s", "other"]);
+    let waiting = std::thread::spawn({
+        let env = h.env();
+        let dir = h.dir.clone();
+        move || {
+            let bin = std::env::var("NERDMUX_TEST_BIN").unwrap_or_else(|_| BIN.to_string());
+            Command::new(bin)
+                .args(["run", "-t", "main", "-n", "job", "--", "sleep", "30"])
+                .env_clear()
+                .envs(env)
+                .current_dir(dir)
+                .output()
+                .unwrap()
+        }
+    });
+    let until = Instant::now() + TIMEOUT;
+    while !panes(&h).iter().any(|p| p[2] == "job") {
+        assert!(Instant::now() < until, "the job never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(h.nerdmux(&["kill-session", "-t", "main"]).status.success());
+    let out = waiting.join().unwrap();
+    assert_eq!(out.status.code(), Some(125));
+    assert!(text(&out.stderr).contains("was closed"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn send_types_into_a_pane_and_capture_reads_it_back() {
+    let h = Harness::new();
+    assert!(h.nerdmux(&["send", "-t", "main", "--enter", "--", "echo", "sum=$((40+2))"]).status.success());
+    wait_capture(&h, &["-t", "main"], |t| t.contains("sum=42"));
+}
+
+#[test]
+fn send_without_enter_only_types() {
+    let h = Harness::new();
+    h.nerdmux(&["send", "-t", "main", "--", "echo typed-not-run"]);
+    let got = wait_capture(&h, &["-t", "main"], |t| t.contains("echo typed-not-run"));
+    assert_eq!(got.matches("typed-not-run").count(), 1, "{got}");
+}
+
+#[test]
+fn targets_reach_a_window_by_name_and_by_number() {
+    let h = Harness::new();
+    h.nerdmux(&["new-window", "-n", "second"]);
+    h.nerdmux(&["send", "-t", "main:second", "--enter", "--", "echo", "in-$((1+1))"]);
+    wait_capture(&h, &["-t", "main:second"], |t| t.contains("in-2"));
+    wait_capture(&h, &["-t", "main:2"], |t| t.contains("in-2"));
+    assert!(!h.stdout(&["capture", "-t", "main:1"]).contains("in-2"));
+
+    let missing = h.nerdmux(&["capture", "-t", "main:nope"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(text(&missing.stderr).contains("no window"), "{}", text(&missing.stderr));
+    assert_eq!(h.nerdmux(&["capture", "-p", "9999"]).status.code(), Some(1));
+    assert_eq!(h.nerdmux(&["send", "-t", "nope", "--enter"]).status.code(), Some(1));
+}
+
+#[test]
+fn capture_reaches_the_scrollback_and_can_take_just_the_end() {
+    let h = Harness::new();
+    h.nerdmux(&["send", "-t", "main", "--enter", "--", "seq 1 500; echo finished"]);
+    let all = wait_capture(&h, &["-t", "main"], |t| t.lines().any(|l| l == "finished"));
+    assert!(all.lines().any(|l| l == "1"), "the top of the scrollback is there:\n{all}");
+    let end = h.stdout(&["capture", "-t", "main", "-n", "3"]);
+    let lines: Vec<&str> = end.lines().collect();
+    assert_eq!(lines.len(), 3, "{end}");
+    assert!(lines.contains(&"finished"), "{end}");
+}
+
+#[test]
+fn capture_gives_a_wrapped_line_back_whole() {
+    let h = Harness::new();
+    let long = "x".repeat(300);
+    let out = h.nerdmux(&["run", "--", "printf", &format!("{long}\\n")]);
+    assert_eq!(text(&out.stdout).trim_end(), long);
+}
+
+#[test]
+fn panes_lists_every_field_a_script_needs() {
+    let h = Harness::new();
+    h.nerdmux(&["new-window", "-n", "tools", "--", "sleep", "30"]);
+    let until = Instant::now() + TIMEOUT;
+    let tools = loop {
+        let row = panes(&h).into_iter().find(|p| p[2] == "tools").expect("the window is listed");
+        if row[8] == "sleep" || Instant::now() > until {
+            break row;
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    };
+    assert_eq!(tools.len(), 9, "{tools:?}");
+    assert_eq!(tools[0], "main");
+    assert_eq!(tools[1], "2");
+    assert_eq!(tools[8], "sleep");
+    assert!(tools[5].parse::<u16>().unwrap() > 0 && tools[6].parse::<u16>().unwrap() > 0);
+    assert_eq!(std::path::Path::new(&tools[7]).canonicalize().unwrap(), h.dir.canonicalize().unwrap());
+    assert_eq!(h.nerdmux(&["panes", "-t", "nope"]).status.code(), Some(1));
+}
+
+#[test]
+fn a_session_on_another_socket_is_untouched_by_these_commands() {
+    let (a, b) = (Harness::new(), Harness::new());
+    a.nerdmux(&["send", "-t", "main", "--enter", "--", "echo", "only-$((1+1))"]);
+    wait_capture(&a, &["-t", "main"], |t| t.contains("only-2"));
+    assert!(!b.stdout(&["capture", "-t", "main"]).contains("only-2"));
+}
+

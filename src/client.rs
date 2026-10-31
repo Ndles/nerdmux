@@ -231,7 +231,12 @@ fn one_shot(mut stream: UnixStream, request: Request) -> anyhow::Result<i32> {
                 }
                 return Ok(code);
             }
-            Ok(S2C::Output(_)) => {}
+            // Only `run` sends text, and it goes where a program's output goes.
+            Ok(S2C::Output(bytes)) => {
+                let mut out = std::io::stdout();
+                out.write_all(&bytes)?;
+                out.flush()?;
+            }
             Err(_) => return Err(ServerGone.into()),
         }
     }

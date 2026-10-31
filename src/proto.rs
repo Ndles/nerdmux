@@ -8,7 +8,7 @@
 
 use std::io::{self, Read, Write};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 const MAX_FRAME: u32 = 64 * 1024 * 1024;
 
 pub const SHIFT: u8 = 1;
@@ -152,6 +152,36 @@ pub enum Request {
         pane: Option<u32>,
         name: Option<String>,
         reuse: bool,
+        command: Vec<String>,
+    },
+    /// Type `text` into a pane. With `interrupt`, Ctrl+C goes first; with
+    /// `enter`, Enter goes last.
+    Send {
+        target: Option<String>,
+        pane: Option<u32>,
+        text: String,
+        enter: bool,
+        interrupt: bool,
+    },
+    /// The text of a pane, scrollback included: all of it, or its last `lines`.
+    Capture {
+        target: Option<String>,
+        pane: Option<u32>,
+        lines: Option<u32>,
+    },
+    /// One line of tab-separated fields per pane, of session `target` or all.
+    Panes {
+        target: Option<String>,
+    },
+    /// Run `command` in a new window without switching to it. The answer comes
+    /// when it ends: its text as `S2C::Output`, its exit code in `S2C::Exit`.
+    /// After `timeout` seconds the text so far comes back with code 124 and the
+    /// program keeps running.
+    Run {
+        target: Option<String>,
+        pane: Option<u32>,
+        name: Option<String>,
+        timeout: Option<u32>,
         command: Vec<String>,
     },
 }
@@ -495,6 +525,32 @@ impl Wire for Request {
                 reuse.put(out);
                 command.put(out);
             }
+            Request::Send { target, pane, text, enter, interrupt } => {
+                out.push(9);
+                target.put(out);
+                pane.put(out);
+                text.put(out);
+                enter.put(out);
+                interrupt.put(out);
+            }
+            Request::Capture { target, pane, lines } => {
+                out.push(10);
+                target.put(out);
+                pane.put(out);
+                lines.put(out);
+            }
+            Request::Panes { target } => {
+                out.push(11);
+                target.put(out);
+            }
+            Request::Run { target, pane, name, timeout, command } => {
+                out.push(12);
+                target.put(out);
+                pane.put(out);
+                name.put(out);
+                timeout.put(out);
+                command.put(out);
+            }
         }
     }
     fn get(input: &mut &[u8]) -> io::Result<Self> {
@@ -512,6 +568,22 @@ impl Wire for Request {
                 pane: Wire::get(input)?,
                 name: Wire::get(input)?,
                 reuse: Wire::get(input)?,
+                command: Wire::get(input)?,
+            },
+            9 => Request::Send {
+                target: Wire::get(input)?,
+                pane: Wire::get(input)?,
+                text: Wire::get(input)?,
+                enter: Wire::get(input)?,
+                interrupt: Wire::get(input)?,
+            },
+            10 => Request::Capture { target: Wire::get(input)?, pane: Wire::get(input)?, lines: Wire::get(input)? },
+            11 => Request::Panes { target: Wire::get(input)? },
+            12 => Request::Run {
+                target: Wire::get(input)?,
+                pane: Wire::get(input)?,
+                name: Wire::get(input)?,
+                timeout: Wire::get(input)?,
                 command: Wire::get(input)?,
             },
             _ => return Err(bad("unknown request")),
@@ -631,6 +703,22 @@ mod tests {
                 name: Some("fleet".into()),
                 reuse: true,
                 command: vec!["nerdfleet".into()],
+            },
+            Request::Send {
+                target: Some("w:2".into()),
+                pane: None,
+                text: "ls\n".into(),
+                enter: true,
+                interrupt: true,
+            },
+            Request::Capture { target: None, pane: Some(4), lines: Some(200) },
+            Request::Panes { target: Some("w".into()) },
+            Request::Run {
+                target: Some("w".into()),
+                pane: None,
+                name: Some("job".into()),
+                timeout: Some(30),
+                command: vec!["make".into(), "test".into()],
             },
         ] {
             let msg = C2S::Hello { version: 1, cols: 1, rows: 1, cwd: String::new(), env: Vec::new(), request };
