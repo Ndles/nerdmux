@@ -414,6 +414,23 @@ fn attach_shows_shell_and_status_bar() {
 }
 
 #[test]
+fn redraw_repaints_what_the_terminal_lost() {
+    let h = Harness::new();
+    let mut c = h.attach(80, 24);
+    c.run("echo ready");
+    c.wait_text("ready");
+    // Leftovers the server knows nothing about: frames only send changed
+    // cells, so they stay until the whole screen is sent again.
+    c.parser.advance(&mut c.term, b"\x1b[12;30HLEFTOVER");
+    c.pump(Duration::from_millis(200));
+    assert!(c.screen().iter().any(|l| l.contains("LEFTOVER")), "{}", c.dump());
+    c.key(Key::alt(' '));
+    c.key(Key::new(KeyCode::Char('l'), CTRL));
+    c.wait_gone("LEFTOVER");
+    c.wait_text("ready");
+}
+
+#[test]
 fn padding_keeps_panes_off_the_edges() {
     let h = Harness::with_config("padding = 2");
     let mut c = h.attach(80, 24);

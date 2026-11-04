@@ -86,6 +86,8 @@ pub enum Action {
     Help,
     SendPrefix,
     ReloadConfig,
+    /// Repaint the whole screen, for when the terminal shows leftovers.
+    Redraw,
     /// The settings panel.
     Settings,
     None,
@@ -139,6 +141,7 @@ impl Action {
             Action::Help => "help".into(),
             Action::SendPrefix => "send-prefix".into(),
             Action::ReloadConfig => "reload-config".into(),
+            Action::Redraw => "redraw".into(),
             Action::Settings => "settings".into(),
             Action::None => "none".into(),
         }
@@ -206,6 +209,7 @@ impl Action {
             "help" => Action::Help,
             "send-prefix" => Action::SendPrefix,
             "reload-config" => Action::ReloadConfig,
+            "redraw" | "refresh-client" => Action::Redraw,
             "settings" | "preferences" => Action::Settings,
             "none" | "unbind" => Action::None,
             _ => return None,
@@ -259,6 +263,7 @@ impl Action {
             Action::Help => "show all keys".into(),
             Action::SendPrefix => "send the leader key to the pane".into(),
             Action::ReloadConfig => "reload config".into(),
+            Action::Redraw => "redraw the screen".into(),
             Action::Settings => "settings".into(),
             Action::None => "nothing".into(),
         }
@@ -374,6 +379,7 @@ impl Action {
             Help,
             Settings,
             ReloadConfig,
+            Redraw,
         ]
     }
 }
@@ -564,6 +570,7 @@ pub fn default_prefix_table() -> Table {
         (c('?'), Help),
         (c('h'), Help),
         (c('R'), ReloadConfig),
+        (m(KeyCode::Char('l'), CTRL), Redraw),
         (m(KeyCode::Char(' '), ALT), SendPrefix),
     ];
     for n in 1..=9usize {

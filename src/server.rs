@@ -2757,6 +2757,16 @@ impl Server {
                 let text = self.reload_config().unwrap_or_else(|| "config reloaded".to_string());
                 self.message(cid, text);
             }
+            Action::Redraw => {
+                // Clear the terminal and send every cell again, whatever
+                // the terminal is believed to show.
+                for (id, c) in self.clients.iter_mut() {
+                    if cid.is_none_or(|cid| cid == *id) {
+                        c.full_redraw = true;
+                    }
+                }
+                self.dirty = true;
+            }
             Action::Settings => set_overlay(self, Overlay::Settings(Box::new(settings::Panel::open()))),
         }
     }
