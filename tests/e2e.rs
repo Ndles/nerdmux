@@ -958,6 +958,54 @@ fn two_clients_share_a_session() {
 }
 
 #[test]
+fn an_ending_session_leaves_other_clients_sessions_alone() {
+    // Two terminals, one session each, and a session nobody shows.
+    let h = Harness::new();
+    assert!(h.nerdmux(&["new", "-d", "-s", "other"]).status.success());
+    assert!(h.nerdmux(&["new", "-d", "-s", "spare"]).status.success());
+    let mut a = h.attach(80, 24);
+    let mut b = h.connect(80, 24, Request::Attach { target: Some("other".into()), create: false });
+    b.wait_for("the shell prompt", |s| s.iter().any(|l| l.trim_start().starts_with('$')));
+    let session = |c: &Client| c.status().split_whitespace().next().unwrap_or_default().to_string();
+
+    // `exit` moves the client to the session nobody shows, not to `other`.
+    a.run("exit");
+    a.wait_for("the spare session", |s| s.last().unwrap().trim_start().starts_with("spare"));
+    a.wait_for("its shell prompt", |s| s.iter().any(|l| l.trim_start().starts_with('$')));
+
+    // With every other session on show, the next `exit` detaches instead
+    // of taking over `other`, whose shell keeps running.
+    a.run("exit");
+    let (message, code) = a.wait_exit();
+    assert_eq!((message.as_str(), code), ("[exited]", 0));
+    assert_eq!(h.stdout(&["ls"]).trim(), "other: 1 window, 1 pane (attached)");
+    b.run("echo still-$((6*7))");
+    b.wait_text("still-42");
+    assert_eq!(session(&b), "other");
+}
+
+#[test]
+fn killing_a_session_does_not_move_onto_another_clients() {
+    let h = Harness::new();
+    assert!(h.nerdmux(&["new", "-d", "-s", "other"]).status.success());
+    let mut a = h.attach(80, 24);
+    let mut b = h.connect(80, 24, Request::Attach { target: Some("other".into()), create: false });
+    b.wait_for("the shell prompt", |s| s.iter().any(|l| l.trim_start().starts_with('$')));
+
+    // Killing its own session keeps the window open, in a fresh session,
+    // rather than sharing `other` with the client already showing it.
+    a.key(Key::alt(' '));
+    a.typed("X");
+    a.wait_text("Kill session");
+    a.typed("y");
+    a.wait_gone("Kill session");
+    a.wait_for("a fresh session", |s| s.last().unwrap().trim_start().starts_with('0'));
+    assert_eq!(h.stdout(&["ls"]).trim(), "other: 1 window, 1 pane (attached)\n0: 1 window, 1 pane (attached)");
+    b.run("echo still-$((6*7))");
+    b.wait_text("still-42");
+}
+
+#[test]
 fn repeat_keys_do_not_swallow_typing() {
     let h = Harness::new();
     let mut c = h.attach(100, 30);
