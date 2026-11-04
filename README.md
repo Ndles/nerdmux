@@ -24,7 +24,7 @@ Releases carry one static binary per platform: `x86_64-unknown-linux-musl`, `aar
 `aarch64-apple-darwin` (Apple Silicon).
 
 ```sh
-v=v0.1.1
+v=v0.1.2
 t=x86_64-unknown-linux-musl     # or aarch64-unknown-linux-musl, aarch64-apple-darwin
 curl -fLO https://github.com/Ndles/nerdmux/releases/download/$v/nerdmux-$v-$t.tar.gz
 curl -fLO https://github.com/Ndles/nerdmux/releases/download/$v/nerdmux-$v-$t.tar.gz.sha256
