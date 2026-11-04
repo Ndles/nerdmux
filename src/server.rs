@@ -1457,13 +1457,9 @@ impl Server {
                 self.panes.remove(&pid);
             }
         }
-        let fallback = self.sessions.iter().max_by_key(|s| s.used).map(|s| s.id);
         let affected: Vec<ClientId> = self.clients.values().filter(|c| c.session == sid).map(|c| c.id).collect();
         for cid in affected {
-            // Back to the session the client came from, if it is still there.
-            let previous = self.clients.get(&cid).and_then(|c| c.last_session);
-            let next = previous.filter(|p| self.sessions.iter().any(|s| s.id == *p)).or(fallback);
-            match next {
+            match self.free_session(cid) {
                 Some(next) => {
                     self.switch_client(cid, next);
                     if let Some(c) = self.clients.get_mut(&cid) {
@@ -1482,11 +1478,25 @@ impl Server {
         self.dirty = true;
     }
 
-    /// Client `cid` closes session `sid`: it goes back to the session it came
-    /// from, or the most recently used one, and when `sid` was the last,
-    /// to a fresh session, which takes over the name if it was a number.
+    /// Where client `cid` goes when its session ends: back to the session it
+    /// came from, or else the most recently used one, but never to a session
+    /// another client is showing. Moving there would let the next `exit`
+    /// typed here end a session someone else is using (tmux calls this
+    /// `detach-on-destroy no-detached`). `None` means the client detaches.
+    fn free_session(&self, cid: ClientId) -> Option<SessionId> {
+        let (current, previous) = self.clients.get(&cid).map(|c| (c.session, c.last_session))?;
+        let free = |sid: SessionId| sid != current && !self.clients.values().any(|c| c.id != cid && c.session == sid);
+        previous
+            .filter(|&p| free(p) && self.sessions.iter().any(|s| s.id == p))
+            .or_else(|| self.sessions.iter().filter(|s| free(s.id)).max_by_key(|s| s.used).map(|s| s.id))
+    }
+
+    /// Client `cid` closes session `sid`: it goes where [`Self::free_session`]
+    /// says, and when that is nowhere, to a fresh session, which takes over
+    /// the name if it was a number. Other clients showing `sid` move on, or
+    /// detach, the same way.
     fn close_session(&mut self, cid: ClientId, sid: SessionId) {
-        if self.sessions.len() > 1 {
+        if self.free_session(cid).is_some() {
             self.remove_session(sid);
             return;
         }
