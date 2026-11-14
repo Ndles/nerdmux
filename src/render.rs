@@ -1046,32 +1046,48 @@ fn draw_picker(buf: &mut Buffer, cols: u16, rows: u16, picker: &mut Picker, them
 
 /// "NërdMUX 0.1.0 · Pavel Kuksa · MIT · github.com/…", from Cargo.toml,
 /// centered between `x` and `limit`. The ë is amber, like the glasses over
-/// it in the logo. Parts that do not fit are left out from the end.
-fn draw_about(buf: &mut Buffer, x: u16, y: u16, limit: u16, theme: &Theme) {
+/// it in the logo. Parts that do not fit are left out from the end. The
+/// repository is a link (OSC 8) in terminals that can follow one.
+fn draw_about(buf: &mut Buffer, links: &mut [Option<Hyperlink>], x: u16, y: u16, limit: u16, theme: &Theme) {
     let body = Style::default().bg(theme.popup_bg);
     let repo = env!("CARGO_PKG_REPOSITORY");
+    let shown = repo.strip_prefix("https://").unwrap_or(repo);
     let authors = env!("CARGO_PKG_AUTHORS").replace(':', ", ");
-    let parts =
-        [env!("CARGO_PKG_VERSION"), &authors, env!("CARGO_PKG_LICENSE"), repo.strip_prefix("https://").unwrap_or(repo)];
+    let parts = [env!("CARGO_PKG_VERSION"), &authors, env!("CARGO_PKG_LICENSE"), shown];
     let room = limit.saturating_sub(x);
     let mut tail = String::new();
+    let mut with_repo = false;
     for (i, part) in parts.iter().enumerate() {
         let next = if i == 0 { format!(" {part}") } else { format!(" · {part}") };
         if 7 + text_width(&tail) + text_width(&next) > room {
             break;
         }
         tail.push_str(&next);
+        with_repo = i == parts.len() - 1;
     }
     let x = x + room.saturating_sub(7 + text_width(&tail)) / 2;
     let mut x = put(buf, x, y, "N", limit, body.fg(theme.fg).add_modifier(Modifier::BOLD));
     x = put(buf, x, y, "ë", limit, body.fg(theme.accent).add_modifier(Modifier::BOLD));
     x = put(buf, x, y, "rd", limit, body.fg(theme.fg).add_modifier(Modifier::BOLD));
     x = put(buf, x, y, "MUX", limit, body.fg(theme.dim));
-    put(buf, x, y, &tail, limit, body.fg(theme.dim));
+    let end = put(buf, x, y, &tail, limit, body.fg(theme.dim));
+    if with_repo {
+        let link = Hyperlink::new(Some("nerdmux-repo"), repo.to_string());
+        let width = buf.area.width as usize;
+        for cx in end.saturating_sub(text_width(shown))..end {
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                cell.modifier |= Modifier::from_bits_retain(LINKED);
+            }
+            if let Some(slot) = links.get_mut(y as usize * width + cx as usize) {
+                *slot = Some(link.clone());
+            }
+        }
+    }
 }
 
 fn draw_settings(
     buf: &mut Buffer,
+    links: &mut [Option<Hyperlink>],
     cols: u16,
     rows: u16,
     panel: &mut crate::settings::Panel,
@@ -1131,7 +1147,7 @@ fn draw_settings(
     for sx in inner.x..limit {
         put(buf, sx, inner.y + inner.height - 2, "─", limit, body.fg(theme.border));
     }
-    draw_about(buf, inner.x, inner.y + inner.height - 1, limit, theme);
+    draw_about(buf, links, inner.x, inner.y + inner.height - 1, limit, theme);
     let at = lines.iter().position(|l| matches!(l, Line::Row(i) if *i == panel.selected)).unwrap_or(0);
     // Keep the selection visible, and its heading too when it is the first row.
     let want = if at > 0 && matches!(lines[at - 1], Line::Head(_)) { at - 1 } else { at };
@@ -1422,7 +1438,7 @@ fn compose(client: &mut Client, session: &Session, panes: &mut HashMap<PaneId, P
             cursor = draw_picker(&mut buf, cols, rows, picker, theme).map(|(x, y)| (x, y, 6));
         }
         Some(Overlay::Settings(panel)) => {
-            cursor = draw_settings(&mut buf, cols, rows, panel, config).map(|(x, y)| (x, y, 6));
+            cursor = draw_settings(&mut buf, &mut links, cols, rows, panel, config).map(|(x, y)| (x, y, 6));
         }
         Some(Overlay::Prompt(prompt)) => {
             cursor = draw_prompt(&mut buf, cols, rows, prompt, theme).map(|(x, y)| (x, y, 6));
@@ -1899,6 +1915,26 @@ mod tests {
         let mut out = Vec::new();
         emit_cells(&mut out, &diff(&old.0, &old.1, &new.0, &new.1), 4, RICH);
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b[1;1H\x1b]8;id=b;y\x1b\\a\x1b]8;;\x1b\\\x1b[0m");
+    }
+
+    #[test]
+    fn the_about_line_links_the_repository() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
+        let mut links = vec![None; buf.content.len()];
+        draw_about(&mut buf, &mut links, 0, 0, 120, &Theme::default());
+        drop_covered_links(&buf, &mut links);
+        let repo = env!("CARGO_PKG_REPOSITORY");
+        let shown = repo.strip_prefix("https://").unwrap();
+        let linked: String =
+            buf.content.iter().zip(&links).filter(|(_, l)| l.is_some()).map(|(c, _)| c.symbol()).collect();
+        assert_eq!(linked, shown);
+        assert!(links.iter().flatten().all(|l| l.uri() == repo));
+
+        // Too narrow for the repository: nothing is linked.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
+        let mut links = vec![None; buf.content.len()];
+        draw_about(&mut buf, &mut links, 0, 0, 20, &Theme::default());
+        assert!(links.iter().all(Option::is_none));
     }
 
     #[test]
