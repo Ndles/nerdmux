@@ -302,6 +302,18 @@ fn interactive(mut stream: UnixStream, request: Request) -> anyhow::Result<i32> 
     out.write_all(&first)?;
     out.flush()?;
 
+    // crossterm starts listening for SIGWINCH only when its event reader is
+    // first used, so a resize between reading the size above and now was
+    // lost, and every frame went to a terminal of a different size (rows
+    // past the bottom land on the last row). Start the reader, then check
+    // the size once more.
+    let _ = event::poll(std::time::Duration::ZERO);
+    if let Ok((c, r)) = crossterm::terminal::size() {
+        if (c, r) != (cols, rows) {
+            write_msg(&mut stream, &C2S::Resize(c, r))?;
+        }
+    }
+
     let mut input = stream.try_clone()?;
     thread::Builder::new().name("input".into()).spawn(move || loop {
         let msg = match event::read() {
